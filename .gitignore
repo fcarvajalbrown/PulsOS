@@ -1,0 +1,46 @@
+# build output
+build/
+*.o
+*.a
+*.dylib
+*.so
+*.metallib
+*.air
+
+# cmake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# xcode
+*.xcodeproj
+*.xcworkspace
+*.xcuserstate
+DerivedData/
+
+# macos
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# vscode
+.vscode/*.log
+
+# compiled binary
+pulsos
+
+# python (if any scripts added later)
+__pycache__/
+*.pyc
+*.pyo
+
+# latex session notes output
+docs/sessions/*.aux
+docs/sessions/*.log
+docs/sessions/*.out
+docs/sessions/*.toc
+docs/sessions/*.pdf
