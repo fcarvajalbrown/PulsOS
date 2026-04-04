@@ -1,5 +1,10 @@
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
 #include "../core/process.h"
 #include <stdbool.h>
 
@@ -12,3 +17,7 @@ void          metal_shutdown(MetalContext *ctx);
 bool metal_compute_colors(MetalContext *ctx,
                           const TreemapNode *nodes, int node_count,
                           float *out_colors);
+
+#ifdef __cplusplus
+}
+#endif

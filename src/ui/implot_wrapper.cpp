@@ -19,7 +19,6 @@ extern "C" void implot_sparkline(const char *label, const float *values,
             ImPlotAxisFlags_NoTickLabels | ImPlotAxisFlags_NoTickMarks);
         ImPlot::SetupAxisLimits(ImAxis_Y1, 0, 100, ImPlotCond_Always);
 
-        // offset into ring buffer — implot handles the wrap
         ImPlotSpec spec;
         spec.Offset = offset;
         ImPlot::PlotLine(label, values, count, 1.0, 0.0, spec);

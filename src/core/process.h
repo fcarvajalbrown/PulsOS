@@ -1,5 +1,10 @@
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -53,3 +58,7 @@ typedef struct {
     float    mem_bytes;      // raw bytes — drives box area
     int      pid;            // so click hit-testing maps back to a process
 } TreemapNode;
+
+#ifdef __cplusplus
+}
+#endif
