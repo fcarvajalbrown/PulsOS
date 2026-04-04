@@ -33,6 +33,14 @@
     - [500ms Timer Polling](#500ms-timer-polling)
   - [Data Flow](#data-flow)
   - [Threading Model](#threading-model)
+    - [Strategy — compile-time OS detection, best primitive per platform](#strategy--compile-time-os-detection-best-primitive-per-platform)
+    - [Apple (current) — GCD + QoS](#apple-current--gcd--qos)
+    - [Linux / Windows (future) — pthreads](#linux--windows-future--pthreads)
+    - [Why not just one thread?](#why-not-just-one-thread)
+    - [Multithreading primitives — full comparison](#multithreading-primitives--full-comparison)
+    - [What "core affinity" means here](#what-core-affinity-means-here)
+    - [Pros and cons per option for PulsOS specifically](#pros-and-cons-per-option-for-pulsos-specifically)
+    - [Summary](#summary)
   - [File Dependency Graph](#file-dependency-graph)
 
 ---
@@ -702,6 +710,25 @@ flowchart LR
 
 ## Threading Model
 
+### Strategy — compile-time OS detection, best primitive per platform
+
+PulsOS detects the OS at compile time via CMake and uses the most capable threading primitive available. No runtime detection, no abstraction tax.
+
+```c
+// poll.c
+#ifdef __APPLE__
+    // GCD — maps directly to P/E cores via QoS class
+    #include <dispatch/dispatch.h>
+#else
+    // pthreads — standard on Linux, available on Windows via MinGW
+    #include <pthread.h>
+#endif
+```
+
+### Apple (current) — GCD + QoS
+
+GCD lets the OS scheduler map work to the correct core type automatically. On M4 with 4 performance + 6 efficiency cores:
+
 ```mermaid
 graph TD
     main["main thread\nperformance core\nImGui + Metal encode"]
@@ -714,10 +741,74 @@ graph TD
 ```
 
 - **Main thread** — ImGui frame, Metal command encoding, FSM transitions
-- **Background queue** — blocks on `kevent()`, fires on OS process events
-- **Utility queue** — does the actual `proc_pidinfo()` work, writes to buffer, swaps
+- **Background queue** — blocks on `kevent()`, zero CPU when idle
+- **Utility queue** — `proc_pidinfo()` calls, delta CPU, buffer swap
 
 Three queues, zero mutexes. The atomic swap is the only synchronization primitive.
+
+### Linux / Windows (future) — pthreads
+
+pthreads is POSIX standard on every Unix-like OS and available on Windows via MinGW/pthreads-win32. Same logical structure — two background threads replacing the two GCD queues.
+
+```c
+// equivalent pthread structure for Linux backend
+pthread_t event_thread; // blocks on inotify /proc events
+pthread_t poll_thread;  // does /proc/<pid>/stat reads
+
+// same double buffer atomic swap — no mutex needed
+atomic_store(&write_idx, 1 - wi);
+```
+
+**Why not SDL_Thread:** SDL2 ships cross-platform threading via `SDL_Thread`. Valid option but adds SDL dependency to `poll.c` which should stay UI-library-agnostic. pthreads keeps the core layer clean.
+
+**Why not C11 `_Thread`:** MSVC support is incomplete. pthreads-win32 is more reliable in practice for Windows builds.
+
+### Why not just one thread?
+
+A single-threaded design would call `proc_pidinfo()` on the main thread, blocking ImGui for however long the syscall takes. On a busy system with 500+ processes that's measurable latency — the UI stutters. Separate threads keep the UI frame budget clean.
+
+### Multithreading primitives — full comparison
+
+| Primitive | Platforms | Core affinity | Overhead | Notes |
+|---|---|---|---|---|
+| **GCD + QoS** | Apple only | ✅ P/E core routing | Near zero | Best option on Apple silicon |
+| **pthreads** | Linux, macOS, Windows (MinGW) | ❌ manual `pthread_setaffinity_np` | Low | POSIX standard, reliable everywhere |
+| **C11 `_Thread`** | Linux, macOS | ❌ no affinity API | Low | MSVC support incomplete — avoid for Windows |
+| **SDL_Thread** | All | ❌ no affinity | Low | Would pollute `poll.c` with UI dependency |
+| **Win32 threads** | Windows only | ✅ `SetThreadAffinityMask` | Low | Too platform-specific, symmetric with nothing |
+| **OpenMP** | All (with compiler support) | ❌ data parallel only | Medium | Wrong model — designed for parallel loops, not event loops |
+| **C++ std::thread** | All | ❌ no affinity | Low | C++ only — we're writing C |
+
+### What "core affinity" means here
+
+On a heterogeneous chip like M4 (4 fast + 6 slow cores), you want:
+- **Heavy UI work** → performance cores (4.4GHz, large L2)
+- **Idle waiting + light syscalls** → efficiency cores (2.85GHz, saves power)
+
+GCD QoS does this automatically. pthreads can do it manually via `pthread_setaffinity_np` on Linux, but it requires knowing core topology at runtime and is fragile. On Linux all cores are typically the same speed anyway so it doesn't matter.
+
+### Pros and cons per option for PulsOS specifically
+
+**GCD (Apple)**
+- ✅ OS handles core routing — zero code for P/E split
+- ✅ No mutex needed with double buffer
+- ✅ `dispatch_async` block syntax is clean
+- ❌ Apple only — can't use on Linux/Windows
+
+**pthreads (Linux/Windows)**
+- ✅ Universal, well documented, battle tested
+- ✅ Same double buffer atomic swap works identically
+- ✅ `pthread_create` is straightforward
+- ❌ No automatic core type routing
+- ❌ More boilerplate than GCD blocks
+
+### Summary
+
+| OS | Primitive | Core routing |
+|---|---|---|
+| macOS | GCD + QoS | OS maps to P/E cores automatically |
+| Linux | pthreads | OS scheduler, no core type distinction |
+| Windows | pthreads-win32 | OS scheduler |
 
 ---
 
