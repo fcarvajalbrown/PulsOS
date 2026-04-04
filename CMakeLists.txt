@@ -19,6 +19,7 @@ set(CORE_SOURCES
     src/ui/process_list.c
     src/ui/treemap.c
     src/core/fsm.c
+    src/core/arena.c
 )
 
 # --- UI shim sources (thin C++ ImGui layer) ---

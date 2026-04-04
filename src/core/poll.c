@@ -1,6 +1,8 @@
 #include "poll.h"
 #include "process.h"
 #include "../platform/proc_platform.h"
+#include "fsm.h"
+#include "arena.h"
 
 #ifdef __APPLE__
 #include <dispatch/dispatch.h>
@@ -12,11 +14,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
-#include "fsm.h"
 
 // double buffer — poll writes, UI reads, no mutex needed
-static Snapshot       buffers[2];
-static atomic_int     write_idx = 0;
+static Arena      arenas[2];
+static Snapshot  *buffers[2];
+static atomic_int write_idx = 0;
 
 // per-pid history slots — linear scan is fine at MAX_PROCESSES scale
 static ProcessHistory histories[MAX_PROCESSES];
@@ -113,7 +115,9 @@ static void register_all_pids(const Snapshot *snap) {
 
 static void do_snapshot(void) {
     int wi = atomic_load(&write_idx);
-    Snapshot *buf = &buffers[wi];
+    arena_reset(&arenas[wi]);
+    Snapshot *buf = (Snapshot *)arena_alloc(&arenas[wi], sizeof(Snapshot));
+    if (!buf) { fsm_transition(EVT_SNAPSHOT_FAIL); return; }
 
     int result = proc_get_snapshot(buf);
     if (result < 0) {
@@ -157,7 +161,10 @@ static void event_loop(void) {
 // --- public API ---
 
 void poll_init(void) {
-    memset(buffers,   0, sizeof(buffers));
+    if (arena_init(&arenas[0], sizeof(Snapshot) * 2) < 0) { fsm_transition(EVT_SNAPSHOT_FAIL); return; }
+    if (arena_init(&arenas[1], sizeof(Snapshot) * 2) < 0) { fsm_transition(EVT_SNAPSHOT_FAIL); return; }
+    buffers[0] = (Snapshot *)arena_alloc(&arenas[0], sizeof(Snapshot));
+    buffers[1] = (Snapshot *)arena_alloc(&arenas[1], sizeof(Snapshot));
     memset(histories, 0, sizeof(histories));
     memset(prev_ticks, 0, sizeof(prev_ticks));
     memset(prev_pids,  0, sizeof(prev_pids));
@@ -184,6 +191,8 @@ void poll_init(void) {
 }
 
 void poll_shutdown(void) {
+    arena_destroy(&arenas[0]);
+    arena_destroy(&arenas[1]);
     if (kq >= 0) close(kq);
     if (event_queue) dispatch_release(event_queue);
     if (poll_queue)  dispatch_release(poll_queue);
@@ -191,7 +200,7 @@ void poll_shutdown(void) {
 
 const Snapshot *poll_read(void) {
     // UI reads the buffer poll is NOT currently writing to
-    return &buffers[1 - atomic_load(&write_idx)];
+    return buffers[1 - atomic_load(&write_idx)];
 }
 
 const ProcessHistory *poll_history(int pid) {

@@ -67,6 +67,13 @@
     - [Where it lives in PulsOS](#where-it-lives-in-pulsos)
     - [Why its own file and not inside app.c or poll.c](#why-its-own-file-and-not-inside-appc-or-pollc)
     - [Mealy vs Moore — quick reference](#mealy-vs-moore--quick-reference)
+  - [Arena Allocator](#arena-allocator)
+    - [What it is](#what-it-is)
+    - [Why it's a pointer concept](#why-its-a-pointer-concept)
+    - [Why it matters for PulsOS](#why-it-matters-for-pulsos)
+    - [Properties](#properties)
+    - [Where it lives in PulsOS](#where-it-lives-in-pulsos-1)
+    - [Tradeoffs](#tradeoffs)
 
 ---
 
@@ -1218,3 +1225,88 @@ Nobody reads or writes `app_state` directly. `fsm_state()` is the only getter. O
 | Example | PulsOS FSM — what to render depends on state AND what just happened | traffic light — output (color) depends only on which state you're in |
 
 PulsOS is Mealy because what we render in STATE_SELECTED depends on both the state and which pid was selected (an event parameter).
+
+## Arena Allocator
+
+### What it is
+
+An arena allocator is a memory management strategy where you allocate one large contiguous block of memory upfront, hand out slices of it by bumping a pointer, and free everything at once by resetting the pointer to zero — no individual `free()` calls.
+
+```
+[ used | used | used | used | free.......................... ]
+                              ↑ bump pointer here for next alloc
+```
+
+The entire allocator is pointer arithmetic:
+
+```c
+typedef struct {
+    uint8_t *base;   // start of the block
+    size_t   used;   // how many bytes handed out so far
+    size_t   cap;    // total size of the block
+} Arena;
+
+void *arena_alloc(Arena *a, size_t size) {
+    if (a->used + size > a->cap) return NULL; // out of space
+    void *ptr = a->base + a->used;            // pointer to next free slot
+    a->used += size;                          // bump the pointer
+    return ptr;
+}
+
+void arena_reset(Arena *a) {
+    a->used = 0; // "free" everything — just move pointer back to start
+}
+```
+
+No linked lists, no free lists, no coalescing. Just `base + used`.
+
+### Why it's a pointer concept
+
+- `base` is a raw pointer to a block of memory owned by the arena
+- `base + used` is pointer arithmetic — moving N bytes forward in memory
+- The returned `void *` is cast to whatever type the caller needs
+- `arena_reset` doesn't zero memory — the old data is still physically there, the pointer just pretends it isn't
+
+This is why C gives you pointer arithmetic at all — you're doing manually what `malloc` does internally, but simpler and faster because you're not tracking individual frees.
+
+### Why it matters for PulsOS
+
+Snapshots are short-lived — valid for exactly one frame then replaced. An arena is the perfect fit for this pattern:
+
+1. Allocate everything needed for the snapshot from the arena
+2. Process and render it
+3. Reset the arena
+4. Repeat next frame
+
+Without an arena, adding thread count, network I/O, disk I/O, and disassembly data per process would require `malloc`/`free` per process per frame — fragmenting memory and introducing unpredictable latency spikes on the efficiency core doing real-time poll work.
+
+### Properties
+
+**Cache friendly** — all snapshot data is contiguous in memory. The CPU prefetcher loads it in one pass rather than chasing scattered heap pointers.
+
+**Deterministic** — no hidden allocator overhead, no surprise latency from heap coalescing mid-frame.
+
+**No fragmentation** — resetting the pointer reclaims everything instantly. A 1024-process snapshot allocates and frees as a single unit.
+
+**No leak risk** — you cannot forget to free individual allocations. `arena_reset` handles everything.
+
+### Where it lives in PulsOS
+
+```
+src/core/arena.h   — Arena struct, arena_init(), arena_alloc(), arena_reset(), arena_destroy()
+src/core/arena.c   — implementation
+```
+
+`poll.c` owns two arenas (one per double-buffer slot) and resets them before each snapshot write. The UI reads through the arena memory via `poll_read()` — same zero-copy pattern as before, just backed by the arena instead of static arrays.
+
+### Tradeoffs
+
+| | Arena | malloc/free |
+|---|---|---|
+| Allocation speed | O(1) pointer bump | O(1) amortized but with hidden cost |
+| Deallocation | O(1) reset entire arena | O(1) per object, fragmentation over time |
+| Individual free | ❌ not supported | ✅ |
+| Cache locality | ✅ contiguous | ❌ scattered |
+| Suitable for | short-lived batches (snapshots) | long-lived objects with varied lifetimes |
+
+The one thing an arena cannot do is free individual allocations. For PulsOS this is fine — we never need to free one `ProcessInfo` while keeping others. We always reset the whole snapshot at once.
