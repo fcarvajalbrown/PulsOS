@@ -3,6 +3,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <signal.h>
 
 static SortState g_sort = {1, false}; // default: CPU descending
 
@@ -53,4 +54,8 @@ int process_list_sort(const Snapshot *snap, ProcessInfo *out, int max, SortState
         case 3: qsort(out, count, sizeof(ProcessInfo), cmp_name); break;
     }
     return count;
+}
+
+int process_kill(int pid, int sig) {
+    return kill(pid, sig); // returns 0 on success, -1 on error
 }

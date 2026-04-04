@@ -4,6 +4,7 @@
 #include "../core/fsm.h"
 
 #include "imgui.h"
+#include <signal.h>
 #include <stdio.h>
 
 void ui_process_list(int *selected_pid) {
@@ -56,6 +57,29 @@ void ui_process_list(int *selected_pid) {
                 *selected_pid = p->pid;
                 fsm_transition(EVT_PID_SELECTED);
             }
+        }
+
+        // right-click context menu per row
+        char popup_id[32];
+        snprintf(popup_id, sizeof(popup_id), "##kill_%d", p->pid);
+        if (ImGui::BeginPopupContextItem(popup_id)) {
+            ImGui::Text("%s (%d)", p->name, p->pid);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Terminate (SIGTERM)")) {
+                process_kill(p->pid, SIGTERM);
+                if (*selected_pid == p->pid) {
+                    *selected_pid = -1;
+                    fsm_transition(EVT_PID_DIED);
+                }
+            }
+            if (ImGui::MenuItem("Kill (SIGKILL)")) {
+                process_kill(p->pid, SIGKILL);
+                if (*selected_pid == p->pid) {
+                    *selected_pid = -1;
+                    fsm_transition(EVT_PID_DIED);
+                }
+            }
+            ImGui::EndPopup();
         }
     }
 

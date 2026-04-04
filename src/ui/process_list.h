@@ -6,17 +6,15 @@ extern "C" {
 
 #include "../core/process.h"
 
-// sort state — owned by process_list.c
 typedef struct {
     int  col; // 0=PID 1=CPU 2=MEM 3=Name
     bool asc;
 } SortState;
 
-// sorts a local copy of snap into out[], returns count
 int  process_list_sort(const Snapshot *snap, ProcessInfo *out, int max, SortState *s);
 void process_list_set_sort(SortState *s, int col);
+int  process_kill(int pid, int sig); // sends sig to pid, returns 0 on success
 
-// called from app_ui.cpp
 void ui_process_list(int *selected_pid);
 
 #ifdef __cplusplus
