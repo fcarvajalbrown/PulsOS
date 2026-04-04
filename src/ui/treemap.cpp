@@ -31,17 +31,21 @@ static void layout_row(float *vals, int *pids, int n,
     for (int i = 0; i < n; i++) s += vals[i];
 
     bool horiz = rect.w >= rect.h;
-    float strip = horiz ? (s / total) * rect.h : (s / total) * rect.w;
-    float pos   = horiz ? rect.x : rect.y;
+    // strip fraction relative to the rect's short side
+    float short_side = horiz ? rect.h : rect.w;
+    float strip = (total > 0) ? (s / total) * short_side : 0;
+    float pos   = horiz ? rect.y : rect.x; // pos advances along the long axis
 
     for (int i = 0; i < n; i++) {
         float frac = (s > 0) ? vals[i] / s : 0;
         TreemapNode *nd = &nodes[(*out_idx)++];
         if (horiz) {
-            nd->x = pos; nd->y = rect.y; nd->w = strip; nd->h = frac * rect.h;
+            // strip runs vertically (width=strip), items stack top-to-bottom
+            nd->x = rect.x; nd->y = pos; nd->w = strip; nd->h = frac * rect.h;
             pos += nd->h;
         } else {
-            nd->x = rect.x; nd->y = pos; nd->w = frac * rect.w; nd->h = strip;
+            // strip runs horizontally (height=strip), items stack left-to-right
+            nd->x = pos; nd->y = rect.y; nd->w = frac * rect.w; nd->h = strip;
             pos += nd->w;
         }
         nd->pid         = pids[i];
@@ -71,13 +75,14 @@ static void squarify(float *vals, int *pids, int n,
         if (row_end > 0 && curr_worst > prev_worst) {
             float row_sum = 0;
             for (int j = 0; j < row_end; j++) row_sum += row_vals[j];
-            float strip = (row_sum / total) * strip_w;
+            float short_side = fminf(rect.w, rect.h);
+            float strip2 = (total > 0) ? (row_sum / total) * short_side : 0;
 
             layout_row(row_vals, pids, row_end, rect, total, out_idx);
 
             Rect next = rect;
-            if (rect.w >= rect.h) { next.y += strip; next.h -= strip; }
-            else                  { next.x += strip; next.w -= strip; }
+            if (rect.w >= rect.h) { next.x += strip2; next.w -= strip2; }
+            else                  { next.y += strip2; next.h -= strip2; }
 
             squarify(vals + i, pids + i, n - i, next, out_idx);
             return;
@@ -93,9 +98,14 @@ static int cmp_mem_desc(const void *a, const void *b) {
     return (pb->mem_rss > pa->mem_rss) - (pb->mem_rss < pa->mem_rss);
 }
 
-static ImU32 cpu_color_cpu(float pct) {
-    float t = pct / 100.0f;
-    return ImGui::ColorConvertFloat4ToU32(ImVec4(t, 0.2f, 1.0f - t, 1.0f));
+// HSV color by memory rank — distinct hue per process, more saturated = more CPU
+static ImU32 rank_color(int rank, int total, float cpu_pct) {
+    float hue = (float)rank / (float)(total > 1 ? total : 1);
+    float sat = 0.45f + 0.4f * (cpu_pct / 100.0f);
+    float val = 0.80f;
+    float r, g, b;
+    ImGui::ColorConvertHSVtoRGB(hue, sat, val, r, g, b);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, 1.0f));
 }
 
 void ui_treemap(MetalContext *metal, int *selected_pid) {
@@ -139,7 +149,7 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
         float py = canvas_pos.y + nd->y * canvas_size.y;
         float pw = nd->w * canvas_size.x;
         float ph = nd->h * canvas_size.y;
-        if (pw < 2 || ph < 2) continue;
+        if (pw < 1 || ph < 1) continue; // skip truly invisible nodes
 
         ImU32 fill;
         if (has_metal) {
@@ -147,17 +157,18 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
             fill = ImGui::ColorConvertFloat4ToU32(
                 ImVec4(colors[ci], colors[ci+1], colors[ci+2], colors[ci+3]));
         } else {
-            fill = cpu_color_cpu(nd->cpu_percent);
+            fill = rank_color(i, node_count, nd->cpu_percent);
         }
 
         if (*selected_pid == nd->pid)
             fill = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 0, 1));
 
         dl->AddRectFilled(ImVec2(px, py), ImVec2(px + pw, py + ph), fill, 0, 0);
-        dl->AddRect(ImVec2(px, py), ImVec2(px + pw, py + ph),
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.4f)), 0, 0, 1.0f);
+        if (pw > 2 && ph > 2)
+            dl->AddRect(ImVec2(px, py), ImVec2(px + pw, py + ph),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.5f)), 0, 0, 1.0f);
 
-        if (pw > 40 && ph > 16) {
+        if (pw > 30 && ph > 14) {
             char label[64];
             snprintf(label, sizeof(label), "%s", sorted[i].name);
             dl->AddText(ImVec2(px + 3, py + 3), 0xFFFFFFFF, label, NULL);

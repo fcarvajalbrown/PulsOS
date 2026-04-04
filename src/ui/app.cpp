@@ -75,6 +75,24 @@ static int init_imgui(void) {
 
     if (!ImGui_ImplSDL2_InitForOpenGL(window, gl_ctx)) return -1;
     if (!ImGui_ImplOpenGL3_Init("#version 330 core"))   return -1;
+
+    // DPI-agnostic font: load at 2x then scale down so it's crisp on Retina
+    // and correct size on 1080p
+    int lw, lh, fw, fh;
+    SDL_GetWindowSize(window, &lw, &lh);
+    SDL_GL_GetDrawableSize(window, &fw, &fh);
+    float dpi_scale = (float)fw / (float)lw;
+
+    ImGuiIO &io2 = ImGui::GetIO();
+    io2.Fonts->AddFontDefault();
+    ImFontConfig cfg;
+    cfg.SizePixels = 14.0f * dpi_scale; // bake at physical pixel size
+    io2.Fonts->AddFontDefault(&cfg);
+    io2.Fonts->Build();
+    io2.FontDefault = io2.Fonts->Fonts[1]; // use the scaled font
+    io2.FontGlobalScale = 1.0f / dpi_scale; // scale back to logical size
+    io2.DisplayFramebufferScale = ImVec2(dpi_scale, dpi_scale);
+
     return 0;
 }
 
@@ -124,7 +142,7 @@ static void render_frame(int w, int h) {
             float map_w = (float)w - LIST_W;
             float map_h = (state == STATE_SELECTED) ? (float)h - DETAIL_H : (float)h;
 
-            ImGui::BeginChild("##treemap", ImVec2(map_w, map_h), false);
+            ImGui::BeginChild("##treemap", ImVec2(0, map_h), false);
             ui_treemap(metal, &selected_pid);
             ImGui::EndChild();
 
@@ -171,6 +189,8 @@ int app_run(void) {
 
         int w, h;
         SDL_GetWindowSize(window, &w, &h);
+        int fb_w, fb_h;
+        SDL_GL_GetDrawableSize(window, &fb_w, &fb_h); // actual pixels for Retina
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
@@ -180,7 +200,7 @@ int app_run(void) {
 
         ImGui::Render();
 
-        glViewport(0, 0, w, h);
+        glViewport(0, 0, fb_w, fb_h);
         glClearColor(0.08f, 0.08f, 0.08f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());

@@ -1,110 +1,118 @@
-# PulsOS
+# PulsOS — macOS Process Monitor
 
-![Status](https://img.shields.io/badge/status-in%20development-blue)
-![Version](https://img.shields.io/badge/version-0.1.0--scaffold-orange)
-![Language](https://img.shields.io/badge/language-C-lightgrey?logo=c)
+![Status](https://img.shields.io/badge/status-working-brightgreen)
+![Version](https://img.shields.io/badge/version-0.1.0-orange)
+![Language](https://img.shields.io/badge/language-C%20%2F%20C%2B%2B-lightgrey?logo=c)
 ![Platform](https://img.shields.io/badge/platform-macOS-black?logo=apple)
 ![Chip](https://img.shields.io/badge/optimized-Apple%20M4-silver?logo=apple)
 ![UI](https://img.shields.io/badge/UI-Dear%20ImGui-blueviolet)
 ![GPU](https://img.shields.io/badge/GPU-Metal-red?logo=apple)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Learning](https://img.shields.io/badge/purpose-learning%20%7C%20portfolio-yellow)
 
-> **Pulse of the OS.** A live process monitor for macOS — built in plain C with SDL2, Dear ImGui, and Metal.
+A lightweight, native macOS process monitor and system activity viewer written in C. Displays live CPU usage, memory consumption, and process activity in a sortable list and interactive treemap — without Electron, Python, or any managed runtime.
 
-Treemap view, sortable process list, per-PID sparklines, CPU heatmap. No Electron. No Python. No abstractions you didn't write yourself. Optimized for the Apple M4 unified memory architecture.
-
----
-
-## Why this exists
-
-This is a learning project. The goal is to understand:
-
-- How macOS exposes process data via `proc_pidinfo` (libproc)
-- How `kqueue` push events work vs polling — and why push wins
-- How GCD QoS routing maps work to M4 performance vs efficiency cores
-- How Metal compute shaders use unified memory with zero CPU→GPU copy cost
-- How the squarified treemap algorithm works and why aspect ratio matters
-- How to structure a C project cleanly enough to grow to Linux and Windows later
-
-Every design decision is documented with diagrams in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The rejected patterns section is as important as the active ones.
+Built as an open-source alternative to Activity Monitor, using `kqueue` event-driven process tracking, Metal GPU compute for heatmap rendering, and Dear ImGui for the UI.
 
 ---
 
-## What it does
+## Features
 
-- Live process list — event-driven via `kqueue`, not polling
-- Sortable by CPU%, memory, PID, name
-- Click a process → detail panel with 30s sparkline history
-- Treemap — box area = memory, color = CPU heat via Metal shader
-- Kill a selected process
-- GCD QoS routing — kqueue runs on efficiency cores, UI on performance cores
+- **Live process list** — event-driven via `kqueue`, not polling. Zero CPU overhead when idle.
+- **Sortable columns** — sort by CPU usage, memory, PID, or process name
+- **Squarified treemap** — visualize memory footprint across all running processes at a glance
+- **Per-process detail panel** — CPU history sparkline, RSS/VMS memory, path, PPID
+- **Click to select** — select any process from the list or the treemap
+- **Apple Silicon optimized** — GCD QoS routing maps kqueue to efficiency cores and UI to performance cores
+- **Retina and HiDPI support** — crisp rendering on both Retina and 1080p displays
 
 ---
 
-## Stack
+## Why not just use Activity Monitor?
 
-| Component | Library | Why |
+This project exists to understand how macOS process monitoring works at the syscall level — `proc_pidinfo`, `kqueue`, GCD, and Metal compute. Every layer is written explicitly rather than abstracted away. The architecture is designed to extend cleanly to Linux (`/proc`) and Windows (WMI) later.
+
+---
+
+## Tech stack
+
+| Component | Technology | Notes |
 |---|---|---|
-| Window + input | SDL2 | Cross-platform foundation, no Objective-C required |
-| UI widgets | Dear ImGui via cimgui | Immediate mode — perfect for live data |
-| Charts / sparklines | implot | ImGui-native, reads ring buffer float arrays directly |
-| Process data | macOS `libproc` | Native syscall, zero dependencies |
-| GPU rendering | Metal | Unified memory — zero copy cost on M4 |
-| Concurrency | GCD (`libdispatch`) | QoS class routing to correct core type |
-| Process events | `kqueue` | Push model — OS notifies on spawn/exit, zero idle CPU |
+| Window and input | SDL2 | Cross-platform foundation |
+| UI widgets | Dear ImGui | Immediate mode — ideal for live-updating data |
+| Charts and sparklines | implot | ImGui-native, reads float ring buffers directly |
+| Process data | macOS `libproc` | Native syscall, no dependencies |
+| GPU color mapping | Metal compute shader | Zero-copy `MTLBuffer` on M4 unified memory |
+| Concurrency | GCD (`libdispatch`) | QoS-routed to correct core type |
+| Process events | `kqueue` | Push model — OS notifies on spawn and exit |
 
 ---
 
-## M4 core mapping
+## Apple M4 core mapping
 
 ```
-4 performance cores  → UI thread + Metal command encoding
-6 efficiency cores   → kqueue event loop + GCD background dispatches
-8 GPU cores          → Metal treemap color mapping + render pass
-120 GB/s unified mem → zero-copy MTLBuffer shared between CPU and GPU
+4 performance cores  — UI thread, Metal command encoding
+6 efficiency cores   — kqueue event loop, GCD background dispatches
+8 GPU cores          — Metal treemap color mapping compute pass
+120 GB/s unified mem — zero-copy MTLBuffer shared between CPU and GPU
 ```
 
 ---
 
 ## Building
 
-> macOS only. Requires Xcode Command Line Tools and Homebrew.
+Requires macOS with Xcode Command Line Tools and Homebrew.
 
 ```bash
 brew install sdl2 cmake
 git clone --recurse-submodules https://github.com/fcarvajalbrown/pulsos
 cd pulsos
-cmake -B build
+cmake -B build -G "Unix Makefiles"
 cmake --build build
-sudo ./build/pulsos   # elevated for full process list
+sudo ./build/pulsos
 ```
+
+`sudo` is required to read process info for all system processes, not just the current user.
 
 ---
 
 ## Project structure
 
-See [`SCAFFOLD.txt`](SCAFFOLD.txt) for the full annotated tree.  
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for every design decision.
+See [`SCAFFOLD.ini`](SCAFFOLD.ini) for the full annotated file tree.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for architecture decision records and algorithm documentation.
 
 ---
 
 ## Roadmap
 
-- [x] Architecture design + ADR document
-- [x] Scaffold + README
-- [ ] `process.h` — core data contract
-- [ ] `proc_macos.c` — libproc backend
-- [ ] `poll.c` — kqueue + GCD + double buffer
-- [ ] `metal_context.c` — Metal device setup
-- [ ] `treemap.metal` — color mapping kernel
-- [ ] `app.c` — SDL2 + ImGui bootstrap
-- [ ] `process_list.c` — sortable table
-- [ ] `detail_panel.c` — sparkline panel
-- [ ] `treemap.c` — squarified layout + Metal dispatch
+### Complete
+- [x] kqueue + GCD push-model poll backend
+- [x] libproc macOS process data
+- [x] Double-buffered snapshot with atomic swap
+- [x] Sortable process list
+- [x] Squarified treemap layout
+- [x] Metal shader compile and load pipeline
+- [x] HSV rank-based treemap colors
+- [x] Click-to-select on treemap and list
+- [x] Detail panel scaffold
+- [x] Retina and HiDPI font scaling
+- [x] CMake build with Metal shader compilation step
+
+### Planned
+- [ ] CPU history ring buffer and sparklines in detail panel
+- [ ] Search and filter bar
+- [ ] Process kill via right-click context menu (SIGTERM / SIGKILL)
+- [ ] Thread count column
+- [ ] Network I/O per process
+- [ ] Disk I/O per process
+- [ ] Process tree view (parent/child hierarchy)
+- [ ] Linux backend via `/proc` filesystem
+- [ ] Metal GPU color kernel (currently using CPU HSV fallback)
+- [ ] Windows backend via WMI
+- [ ] GitHub Actions CI matrix (macOS + Linux)
+- [ ] macOS `.app` bundle packaging
 
 ---
 
 ## License
 
-MIT — Felipe Carvajal Brown
+MIT — Felipe Carvajal Brown Software
