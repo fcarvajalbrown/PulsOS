@@ -1,9 +1,9 @@
 #include "detail_panel.h"
+#include "implot_wrapper.h"
 #include "../core/poll.h"
 #include "../core/process.h"
 
 #include <cimgui.h>
-#include <implot.h>
 #include <stdio.h>
 
 void ui_detail_panel(int pid) {
@@ -32,24 +32,8 @@ void ui_detail_panel(int pid) {
 
     igSeparator();
 
-    // cpu sparkline — bare implot line, no frills
-    if (hist && ImPlot_BeginPlot("##cpu_hist",
-            (ImVec2){-1, -1},
-            ImPlotFlags_NoTitle    |
-            ImPlotFlags_NoLegend   |
-            ImPlotFlags_NoMenus    |
-            ImPlotFlags_NoBoxSelect)) {
-
-        ImPlot_SetupAxes("time", "cpu%",
-            ImPlotAxisFlags_NoTickLabels,
-            ImPlotAxisFlags_None);
-        ImPlot_SetupAxisLimits(ImAxis_Y1, 0, 100, ImPlotCond_Always);
-
-        // ring buffer isn't contiguous so we pass full array — implot handles wrap
-        ImPlot_PlotLine_FloatPtrInt("CPU%",
-            hist->cpu_history, HISTORY_LEN,
-            1.0, 0.0, 0, hist->history_head, sizeof(float));
-
-        ImPlot_EndPlot();
-    }
+    // cpu sparkline via C++ wrapper — keeps implot out of C compilation
+    if (hist)
+        implot_sparkline("##cpu_hist", hist->cpu_history,
+                         HISTORY_LEN, hist->history_head, -1, -1);
 }

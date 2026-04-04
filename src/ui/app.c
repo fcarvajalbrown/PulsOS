@@ -7,6 +7,7 @@
 #include "../gpu/metal_context.h"
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_opengl.h>
 #include <cimgui.h>
 #include <cimgui_impl.h>
 #include <stdio.h>
@@ -70,7 +71,7 @@ static int init_sdl(void) {
 static int init_imgui(void) {
     igCreateContext(NULL);
 
-    ImGuiIO *io = igGetIO();
+    ImGuiIO *io = igGetIO_Nil();
     io->ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     // dark theme — easier on the eyes for a monitor tool

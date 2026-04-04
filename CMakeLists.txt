@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(pulsos C OBJC)
+project(pulsos C CXX OBJC)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -20,6 +20,7 @@ set(CORE_SOURCES
     src/ui/detail_panel.c
     src/ui/treemap.c
     src/gpu/metal_context.m
+    src/ui/implot_wrapper.cpp
 )
 
 # --- platform backend selection ---
@@ -67,7 +68,9 @@ target_include_directories(pulsos PRIVATE
 
 # --- compile definitions ---
 target_compile_definitions(pulsos PRIVATE
-    CIMGUI_DEFINE_ENUMS_AND_STRUCTS  # expose ImGui enums to C
+    CIMGUI_DEFINE_ENUMS_AND_STRUCTS  # expose ImGui enums and structs to C
+    CIMGUI_USE_SDL2                  # unlock SDL2 backend in cimgui_impl.h
+    CIMGUI_USE_OPENGL3               # unlock OpenGL3 backend in cimgui_impl.h
     IMGUI_IMPL_OPENGL_LOADER_CUSTOM  # we manage OpenGL ourselves via SDL2
 )
 

@@ -7,8 +7,6 @@
 #include <sys/event.h>
 #include <mach/mach_time.h>
 #else
-#include <pthread.h>
-#include <time.h>
 #endif
 #include <stdatomic.h>
 #include <string.h>

@@ -118,8 +118,6 @@ static int cmp_mem_desc(const void *a, const void *b) {
 // cpu fallback color when Metal is unavailable — simple lerp blue→red
 static ImU32 cpu_color_cpu(float pct) {
     float t = pct / 100.0f;
-    int r = (int)(t * 255);
-    int b = (int)((1.0f - t) * 255);
     return igColorConvertFloat4ToU32((ImVec4){t, 0.2f, 1.0f - t, 1.0f});
 }
 
@@ -162,9 +160,8 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
     bool has_metal = metal && metal_compute_colors(metal, nodes, node_count, colors);
 
     // get canvas size from ImGui
-    ImVec2 canvas_pos, canvas_size;
-    igGetCursorScreenPos(&canvas_pos);
-    igGetContentRegionAvail(&canvas_size);
+    ImVec2 canvas_pos  = igGetCursorScreenPos();
+    ImVec2 canvas_size = igGetContentRegionAvail();
     if (canvas_size.x < 1 || canvas_size.y < 1) return;
 
     ImDrawList *dl = igGetWindowDrawList();
@@ -218,8 +215,7 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
     igSetCursorScreenPos(canvas_pos);
     igInvisibleButton("##treemap_click", canvas_size, 0);
     if (igIsItemClicked(0)) {
-        ImVec2 mouse;
-        igGetMousePos(&mouse);
+        ImVec2 mouse = igGetMousePos();
         float mx = (mouse.x - canvas_pos.x) / canvas_size.x;
         float my = (mouse.y - canvas_pos.y) / canvas_size.y;
 
