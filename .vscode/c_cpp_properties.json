@@ -1,0 +1,30 @@
+{
+    "configurations": [
+        {
+            "name": "macOS",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/vendor/cimgui/imgui",
+                "${workspaceFolder}/vendor/cimgui/imgui/backends",
+                "${workspaceFolder}/vendor/implot",
+                "/opt/homebrew/include",
+                "/opt/homebrew/include/SDL2",
+                "/usr/include",
+                "/usr/local/include"
+            ],
+            "defines": [
+                "CIMGUI_DEFINE_ENUMS_AND_STRUCTS",
+                "IMGUI_IMPL_OPENGL_LOADER_CUSTOM"
+            ],
+            "macFrameworkPath": [
+                "/System/Library/Frameworks",
+                "/Library/Frameworks"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "macos-clang-arm64"
+        }
+    ],
+    "version": 4
+}

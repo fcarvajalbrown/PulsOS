@@ -2,10 +2,14 @@
 #include "process.h"
 #include "../platform/proc_platform.h"
 
+#ifdef __APPLE__
 #include <dispatch/dispatch.h>
 #include <sys/event.h>
-#include <sys/time.h>
 #include <mach/mach_time.h>
+#else
+#include <pthread.h>
+#include <time.h>
+#endif
 #include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>

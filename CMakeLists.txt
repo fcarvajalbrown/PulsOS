@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(pulsos C)
+project(pulsos C OBJC)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -19,7 +19,7 @@ set(CORE_SOURCES
     src/ui/process_list.c
     src/ui/detail_panel.c
     src/ui/treemap.c
-    src/gpu/metal_context.c
+    src/gpu/metal_context.m
 )
 
 # --- platform backend selection ---

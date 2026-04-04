@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "*.m": "objective-c",
+        "*.metal": "cpp"
+    },
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
+}
