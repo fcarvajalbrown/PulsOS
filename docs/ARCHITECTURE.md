@@ -49,6 +49,15 @@
     - [Every pointer in PulsOS and why it's there](#every-pointer-in-pulsos-and-why-its-there)
     - [The three rules we follow in PulsOS](#the-three-rules-we-follow-in-pulsos)
     - [Pointer vs value — quick decision guide](#pointer-vs-value--quick-decision-guide)
+  - [C / C++ Split — The Shim Layer Pattern](#c--c-split--the-shim-layer-pattern)
+    - [The problem](#the-problem)
+    - [The solution — thin C++ shim layer](#the-solution--thin-c-shim-layer)
+    - [Is this a standard professional pattern?](#is-this-a-standard-professional-pattern)
+    - [File map after the split](#file-map-after-the-split)
+    - [Cost of the boundary](#cost-of-the-boundary)
+    - [Pros](#pros)
+    - [Cons](#cons)
+    - [The rule](#the-rule)
 
 ---
 
@@ -995,3 +1004,83 @@ if (!metal) { /* handle gracefully */ }
 | Small value, function doesn't modify it | Value |
 | Sharing data between threads | Pointer to shared buffer |
 | Borrowed reference, don't own it | `const` pointer |
+
+---
+
+## C / C++ Split — The Shim Layer Pattern
+
+### The problem
+
+ImGui and ImPlot are C++ libraries. Their headers use classes, templates, and operator overloads. A `.c` file cannot `#include "imgui.h"` — the compiler will reject it. But we want PulsOS's logic written in pure C for portability, testability, and simplicity.
+
+We cannot eliminate the C++ dependency. We can contain it.
+
+### The solution — thin C++ shim layer
+
+Every UI module is split into two files:
+
+```
+module.c          — pure C: business logic, data, algorithms
+module_ui.cpp     — thin C++ shim: ImGui calls only, no logic
+```
+
+The shim exposes its entry point via `extern "C"` so C code can call it with no overhead:
+
+```cpp
+// module_ui.cpp
+extern "C" void ui_module(int *state) {
+    // only ImGui calls here — no sorting, no math, no decisions
+    ImGui::Begin("##win");
+    // ...
+    ImGui::End();
+}
+```
+
+```c
+// module.h
+#ifdef __cplusplus
+extern "C" {
+#endif
+void ui_module(int *state); // C code calls this freely
+#ifdef __cplusplus
+}
+#endif
+```
+
+### Is this a standard professional pattern?
+
+Yes. The identical boundary is used in production engines. One documented real-world example uses C# for game logic and C++ for Vulkan rendering, with `extern "C"` bridge functions enforcing the split — the author explicitly states "C# never touches Vulkan, and C++ never touches game logic." The pattern is also visible in how high-performance game engine subsystems (physics, collision, animation) are written in C-style code with minimal C++ features to control what the compiler generates.
+
+### File map after the split
+
+| Pure C (logic) | C++ shim (ImGui only) |
+|---|---|
+| `app.c` | `app_ui.cpp` |
+| `process_list.c` | `process_list_ui.cpp` |
+| `treemap.c` | `treemap_ui.cpp` |
+| `detail_panel.c` | `detail_panel_ui.cpp` |
+| `poll.c` | — (no UI) |
+| `proc_macos.c` | — (no UI) |
+| — | `implot_wrapper.cpp` |
+
+### Cost of the boundary
+
+`extern "C"` is a calling convention declaration, not a wrapper. The compiler sees through it completely. There is zero runtime overhead versus writing everything in one `.cpp` file — the generated machine code is identical.
+
+### Pros
+
+- Logic is testable without ImGui
+- Adding Linux/Windows backends touches zero C++ code
+- The compiler enforces the boundary — a `.c` file physically cannot call ImGui
+- Swapping ImGui for another renderer means rewriting only the thin shims
+- Platform code (kqueue, libproc, GCD) stays in its natural language, C
+
+### Cons
+
+- Every new UI-visible feature requires touching both the `.c` logic file and the `.cpp` shim
+- `void *` casts are needed for SDL types in `app_ui.h` to avoid pulling C++ headers into C — inelegant but contained
+- The boundary only holds if you never let logic creep back into the `.cpp` files — discipline required
+
+### The rule
+
+If you find yourself writing an `if` statement, a `qsort`, or any data manipulation inside a `_ui.cpp` file, it belongs in the `.c` file instead. The shim calls the C function and passes the result to ImGui. That's it.

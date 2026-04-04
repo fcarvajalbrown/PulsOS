@@ -10,16 +10,24 @@ set(IMGUI_DIR   ${CIMGUI_DIR}/imgui)
 
 find_package(SDL2 REQUIRED)
 
-# --- core sources ---
+# --- core sources (pure C) ---
 set(CORE_SOURCES
     src/main.c
     src/core/poll.c
-    src/ui/app.cpp
-    src/ui/process_list.cpp
-    src/ui/detail_panel.cpp
-    src/ui/treemap.cpp
-    src/gpu/metal_context.m
+    src/ui/app.c
+    src/ui/detail_panel.c
+    src/ui/process_list.c
+    src/ui/treemap.c
+)
+
+# --- UI shim sources (thin C++ ImGui layer) ---
+set(UI_SHIM_SOURCES
+    src/ui/app_ui.cpp
+    src/ui/detail_panel_ui.cpp
+    src/ui/process_list_ui.cpp
+    src/ui/treemap_ui.cpp
     src/ui/implot_wrapper.cpp
+    src/gpu/metal_context.m
 )
 
 if(APPLE)
@@ -30,7 +38,7 @@ elseif(WIN32)
     list(APPEND CORE_SOURCES src/platform/proc_windows.c)
 endif()
 
-# --- imgui core + backends (C++, no cimgui binding layer) ---
+# --- imgui core + backends ---
 set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_demo.cpp
@@ -69,7 +77,7 @@ add_custom_command(OUTPUT ${METAL_LIB}
 add_custom_target(metal_shader DEPENDS ${METAL_LIB})
 
 # --- executable ---
-add_executable(pulsos ${CORE_SOURCES})
+add_executable(pulsos ${CORE_SOURCES} ${UI_SHIM_SOURCES})
 add_dependencies(pulsos metal_shader)
 
 target_include_directories(pulsos PRIVATE

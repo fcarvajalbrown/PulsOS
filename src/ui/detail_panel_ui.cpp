@@ -4,20 +4,16 @@
 #include "../core/process.h"
 
 #include "imgui.h"
-#include <stdio.h>
 
 void ui_detail_panel(int pid) {
     const Snapshot       *snap = poll_read();
+    const ProcessInfo    *info = detail_find(snap, pid);
     const ProcessHistory *hist = poll_history(pid);
-
-    const ProcessInfo *info = NULL;
-    for (int i = 0; i < snap->count; i++)
-        if (snap->procs[i].pid == pid) { info = &snap->procs[i]; break; }
 
     if (!info) { ImGui::Text("Process gone."); return; }
 
-    ImGui::Text("PID: %d",   info->pid);   ImGui::SameLine(0, 20);
-    ImGui::Text("PPID: %d",  info->ppid);  ImGui::SameLine(0, 20);
+    ImGui::Text("PID: %d",     info->pid);   ImGui::SameLine(0, 20);
+    ImGui::Text("PPID: %d",    info->ppid);  ImGui::SameLine(0, 20);
     ImGui::Text("CPU: %.1f%%", info->cpu_percent); ImGui::SameLine(0, 20);
     ImGui::Text("RSS: %.1f MB", (float)info->mem_rss / (1024*1024)); ImGui::SameLine(0, 20);
     ImGui::Text("VMS: %.1f MB", (float)info->mem_vms / (1024*1024));
