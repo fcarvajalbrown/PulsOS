@@ -2,7 +2,7 @@
 
 > A living document. Every design choice here was made consciously.
 > Read this when you're confused about *why* something is the way it is.
-> The rejected patterns section is just as important as the active ones — knowing what you didn't do and why is real architecture thinking.
+> The algorithms section explains the math in full — not just what we use but how it works.
 
 ---
 
@@ -11,19 +11,26 @@
 - [PulsOS — Architecture Decision Record](#pulsos--architecture-decision-record)
   - [Table of Contents](#table-of-contents)
   - [System Overview](#system-overview)
+  - [M4 Hardware Map](#m4-hardware-map)
   - [Active Patterns](#active-patterns)
-    - [1. Platform Abstraction Layer (PAL)](#1-platform-abstraction-layer-pal)
-    - [2. Double Buffering](#2-double-buffering)
-    - [3. Snapshot + Delta for CPU%](#3-snapshot--delta-for-cpu)
-    - [4. Ring Buffer for History](#4-ring-buffer-for-history)
-    - [5. Immediate Mode UI (Dear ImGui)](#5-immediate-mode-ui-dear-imgui)
-    - [6. Finite State Machine](#6-finite-state-machine)
+    - [1. Platform Abstraction Layer](#1-platform-abstraction-layer)
+    - [2. kqueue Push Model](#2-kqueue-push-model)
+    - [3. GCD QoS Routing](#3-gcd-qos-routing)
+    - [4. Double Buffering](#4-double-buffering)
+    - [5. Ring Buffer for History](#5-ring-buffer-for-history)
+    - [6. Immediate Mode UI](#6-immediate-mode-ui)
+    - [7. Finite State Machine](#7-finite-state-machine)
+    - [8. Metal Compute Layer](#8-metal-compute-layer)
+  - [Algorithms In Depth](#algorithms-in-depth)
+    - [Squarified Treemap](#squarified-treemap)
+    - [Delta CPU Calculation](#delta-cpu-calculation)
+    - [Shannon Entropy (future)](#shannon-entropy-future)
+    - [Metal Color Mapping Kernel](#metal-color-mapping-kernel)
   - [Rejected Patterns](#rejected-patterns)
     - [Entity-Component System (ECS)](#entity-component-system-ecs)
     - [Observer / Event Bus](#observer--event-bus)
     - [Command Pattern](#command-pattern)
-    - [Plugin / Panel Registry](#plugin--panel-registry)
-    - [Push Model (kqueue)](#push-model-kqueue)
+    - [500ms Timer Polling](#500ms-timer-polling)
   - [Data Flow](#data-flow)
   - [Threading Model](#threading-model)
   - [File Dependency Graph](#file-dependency-graph)
@@ -32,82 +39,198 @@
 
 ## System Overview
 
-PulsOS is a live process monitor. The data pipeline goes:
+PulsOS is a live process monitor. Three layers, strictly separated:
 
 ```
-macOS kernel → libproc → poll layer → double buffer → UI (ImGui)
+┌─────────────────────────────────────────────────────────┐
+│                      UI Layer                            │
+│     process_list.c    detail_panel.c    treemap.c        │
+└───────────────────────────┬─────────────────────────────┘
+                            │ reads snapshot + history
+┌───────────────────────────▼─────────────────────────────┐
+│                     Core Layer                           │
+│   poll.c — kqueue events · GCD dispatch · double buffer  │
+└───────────────────────────┬─────────────────────────────┘
+                            │ calls
+┌───────────────────────────▼─────────────────────────────┐
+│                   Platform Layer                         │
+│   proc_macos.c — libproc fills Snapshot struct           │
+│   proc_linux.c  — stub                                   │
+│   proc_windows.c — stub                                  │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│                      GPU Layer                           │
+│   metal_context.c — device setup                         │
+│   treemap.metal — color mapping kernel                   │
+│   MTLBuffer — shared with CPU via unified memory         │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Three concerns are kept strictly separate:
+**Rule:** UI never touches platform. Platform never touches UI. GPU layer is called only by treemap.c. poll.c is the only file that calls platform.
 
-- **Platform** — knows about the OS, nothing else
-- **Core** — knows about data shapes and timing, nothing about OS or UI
-- **UI** — knows about rendering, nothing about OS
+---
+
+## M4 Hardware Map
+
+Your machine: MacBook Air M4 2025 — 10-core CPU (4P + 6E), 8-core GPU, 120GB/s unified memory.
 
 ```
-┌──────────────────────────────────────────────────┐
-│                   UI Layer                        │
-│   process_list.c   detail_panel.c   treemap.c    │
-└────────────────────────┬─────────────────────────┘
-                         │ reads snapshot + history
-┌────────────────────────▼─────────────────────────┐
-│                  core/poll.c                      │
-│   double buffer · delta CPU · ring buffer         │
-└────────────────────────┬─────────────────────────┘
-                         │ calls once per tick
-┌────────────────────────▼─────────────────────────┐
-│            platform/proc_macos.c                  │
-│         libproc → fills Snapshot struct           │
-└──────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    Apple M4 SoC                          │
+│                                                          │
+│  ┌──────────────┐   ┌──────────────────────────────┐    │
+│  │ Performance  │   │      Efficiency Cores         │    │
+│  │   Cores (4)  │   │           (6)                 │    │
+│  │  4.4 GHz     │   │        2.85 GHz               │    │
+│  │              │   │                               │    │
+│  │  UI thread   │   │  kqueue event loop            │    │
+│  │  ImGui frame │   │  GCD background queues        │    │
+│  │  Metal encode│   │  poll dispatches              │    │
+│  └──────────────┘   └──────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │              GPU Cores (8)                        │   │
+│  │   treemap.metal — color mapping kernel            │   │
+│  │   render pass — box drawing + antialiasing        │   │
+│  └──────────────────────────────────────────────────┘   │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │         Unified Memory (120 GB/s)                 │   │
+│  │   CPU writes ProcessInfo[] → MTLBuffer            │   │
+│  │   GPU reads MTLBuffer directly — zero copy        │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
 ```
+
+The fanless design means sustained GPU compute would throttle. This is irrelevant — the treemap kernel runs in microseconds, not continuously. PulsOS will never thermal-throttle the Air.
 
 ---
 
 ## Active Patterns
 
-### 1. Platform Abstraction Layer (PAL)
+### 1. Platform Abstraction Layer
 
-Each OS backend exposes the exact same function signature:
+Each OS backend exposes one identical function:
 
 ```c
-// proc_platform.h — the contract
+// proc_platform.h
 int proc_get_snapshot(Snapshot *out);
 ```
 
-CMake selects which `.c` file to compile. The rest of the codebase never `#ifdef` for OS — only `CMakeLists.txt` does.
+CMake selects which `.c` file compiles based on target OS. Nothing else in the codebase ever `#ifdef`s for OS.
 
 ```mermaid
 graph TD
-    poll["poll.c"] -->|calls| contract["proc_get_snapshot()"]
-    contract --> mac["proc_macos.c\n✅ v0.1"]
-    contract --> linux["proc_linux.c\n🔲 v0.5"]
-    contract --> win["proc_windows.c\n🔲 v0.5"]
+    poll["poll.c"] -->|calls| sig["proc_get_snapshot()"]
+    sig --> mac["proc_macos.c ✅"]
+    sig --> lin["proc_linux.c 🔲 stub"]
+    sig --> win["proc_windows.c 🔲 stub"]
 
     style mac fill:#2d5a27,color:#fff
-    style linux fill:#3a3a3a,color:#aaa
+    style lin fill:#3a3a3a,color:#aaa
     style win fill:#3a3a3a,color:#aaa
 ```
 
-**Why:** Isolates OS ugliness behind a single function. You can rewrite `proc_macos.c` from scratch without touching poll.c or any UI file.
+**Why:** You can rewrite `proc_macos.c` entirely without touching a single UI or poll file. The contract is the function signature.
 
-**Alternative — `#ifdef` blocks in one file:**
-```c
-// everything in proc.c
-int proc_get_snapshot(Snapshot *out) {
-#ifdef __APPLE__
-    // macOS code
-#elif __linux__
-    // linux code
-#endif
-}
-```
-Works, but the file becomes unreadable fast. Harder to test each backend in isolation.
+**Alternative rejected — `#ifdef` in one file:** Readable at first, becomes a maintenance nightmare when each branch grows to 200 lines.
 
 ---
 
-### 2. Double Buffering
+### 2. kqueue Push Model
 
-Two `Snapshot` buffers in memory. Poll writes to one; UI reads from the other. They swap atomically after each poll cycle.
+Instead of polling every N milliseconds, we register `kqueue` filters and let the OS notify us when something changes.
+
+```c
+// register interest in all process events
+struct kevent ev;
+EV_SET(&ev, pid, EVFILT_PROC, EV_ADD,
+       NOTE_EXIT | NOTE_FORK | NOTE_EXEC, 0, NULL);
+kevent(kq, &ev, 1, NULL, 0, NULL);
+
+// blocking wait — returns when OS fires an event
+kevent(kq, NULL, 0, &event, 1, NULL);
+```
+
+```mermaid
+sequenceDiagram
+    participant OS as macOS kernel
+    participant kq as kqueue fd
+    participant GCD as GCD queue
+    participant poll as poll.c
+    participant UI as UI thread
+
+    OS->>kq: process spawned / exited / execed
+    kq->>GCD: event fired (efficiency core)
+    GCD->>poll: dispatch_async handler
+    poll->>poll: proc_get_snapshot() → write buffer
+    poll->>poll: atomic swap buffers
+    UI->>UI: reads read buffer next frame
+```
+
+**Why over polling:**
+- Zero CPU when nothing changes — the efficiency cores sleep
+- Catches processes that live and die within a 500ms poll window
+- OS does the work of detecting change, not your timer
+
+**What kqueue can watch:**
+- `NOTE_EXIT` — process died
+- `NOTE_FORK` — process spawned a child
+- `NOTE_EXEC` — process called exec (became a different program)
+- `NOTE_SIGNAL` — process received a signal
+
+**Limitation:** You must register each PID individually. At startup you enumerate all PIDs via `proc_listallpids()` and register them all. New PIDs from `NOTE_FORK` are registered as they appear.
+
+---
+
+### 3. GCD QoS Routing
+
+Grand Central Dispatch lets you declare the priority class of work. The OS scheduler maps QoS classes to core types on M4.
+
+```c
+// kqueue loop → efficiency cores
+dispatch_queue_t eq = dispatch_queue_create(
+    "com.pulsos.events",
+    dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL,
+        QOS_CLASS_BACKGROUND, 0   // → efficiency cores
+    )
+);
+
+// snapshot processing → utility level
+dispatch_queue_t pq = dispatch_queue_create(
+    "com.pulsos.poll",
+    dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL,
+        QOS_CLASS_UTILITY, 0      // → efficiency cores, higher priority
+    )
+);
+
+// UI always runs on main thread → performance cores
+dispatch_get_main_queue(); // → performance cores
+```
+
+```mermaid
+graph LR
+    kq["kqueue\nevent fires"]
+    bg["QOS_CLASS_BACKGROUND\nefficiency cores"]
+    ut["QOS_CLASS_UTILITY\nefficiency cores"]
+    main["main queue\nperformance cores"]
+
+    kq --> bg
+    bg -->|"dispatch_async"| ut
+    ut -->|"atomic swap done\ndispatch_async main"| main
+    main --> ui["ImGui frame\nMetal encode"]
+```
+
+**Why this matters on M4:** The 6 efficiency cores run at 2.85GHz — plenty for `proc_pidinfo()` calls and buffer math. The 4 performance cores at 4.4GHz stay fully available for ImGui + Metal command encoding. No contention.
+
+---
+
+### 4. Double Buffering
+
+Two `Snapshot` buffers. Poll writes to one, UI reads from the other. Swapped atomically.
 
 ```mermaid
 sequenceDiagram
@@ -116,117 +239,106 @@ sequenceDiagram
     participant UI as UI (reader)
 
     Poll->>Buf: write to buffers[write_idx]
-    Poll->>Buf: atomic swap write_idx ↔ read_idx
-    UI->>Buf: read from buffers[read_idx]
-    Note over UI,Buf: UI never sees a half-written snapshot
+    Poll->>Buf: atomic_store write_idx = 1 - write_idx
+    UI->>Buf: read from buffers[1 - write_idx]
+    Note over UI,Buf: UI never reads a half-written snapshot
 ```
 
 ```c
-Snapshot   buffers[2];
-atomic_int write_idx = 0;
-// UI always reads: buffers[1 - write_idx]
+static Snapshot  buffers[2];
+static atomic_int write_idx = 0;
+
+// poll writes:
+int wi = atomic_load(&write_idx);
+proc_get_snapshot(&buffers[wi]);
+atomic_store(&write_idx, 1 - wi);
+
+// UI reads:
+int ri = 1 - atomic_load(&write_idx);
+const Snapshot *s = &buffers[ri];
 ```
 
-**Why:** No mutex needed. UI thread never blocks. No torn reads where half the process list is from the old snapshot and half from the new one.
+**Why no mutex:** A mutex would block the UI thread if poll is slow. The atomic swap is lock-free — the UI either gets the old buffer or the new one, never a partial write.
 
-**Alternative — single buffer with mutex:**
-```c
-pthread_mutex_lock(&snap_mutex);
-// poll writes...
-pthread_mutex_unlock(&snap_mutex);
-```
-Simpler, but UI stutters if poll is slow. The mutex becomes a bottleneck at high process counts.
+**MTLBuffer variant for GPU:** The treemap color data uses a `MTLBuffer` with `MTLResourceStorageModeShared` — the same physical memory is visible to both CPU and GPU without any copy on M4.
 
 ---
 
-### 3. Snapshot + Delta for CPU%
+### 5. Ring Buffer for History
 
-All OSes give cumulative CPU ticks since process start — never a live percentage. You must compute the delta between two consecutive polls.
-
-```
-cpu% = (ticks_b - ticks_a) / elapsed_seconds / num_cores * 100
-```
-
-```mermaid
-timeline
-    title CPU% Calculation
-    t=0.0s  : Poll A — store ticks_a per PID
-    t=0.5s  : Poll B — store ticks_b per PID
-            : compute cpu% = Δticks / 0.5s
-    t=1.0s  : Poll C — store ticks_c per PID
-            : compute cpu% = Δticks / 0.5s
-```
-
-**Why:** Any single-sample reading is meaningless. This is the only correct approach and every OS requires it.
-
-**Future (v0.2):** Exponential moving average over the delta to smooth visual spikes.
-
----
-
-### 4. Ring Buffer for History
-
-Each process keeps a fixed `float cpu_history[HISTORY_LEN]` written in a circle. `HISTORY_LEN = 60` → 30 seconds at 500ms poll interval.
+Each tracked PID keeps a circular array of CPU% samples for sparkline rendering.
 
 ```
-Write head moves forward, wraps at HISTORY_LEN:
+HISTORY_LEN = 60  →  30 seconds at 500ms effective update rate
 
-index:  0    1    2    3   ...  59
-       [0.1][0.3][0.8][0.2]...[0.5]
-                  ▲
-             history_head (next write position)
+Write head moves forward, wraps at 60:
+
+index:  0     1     2     3    ...   59
+       [0.1] [0.3] [0.8] [0.2] ... [0.5]
+                    ▲
+               history_head (next write position)
+
+After write: history_head = (history_head + 1) % HISTORY_LEN
 ```
-
-**Memory cost:** 1024 processes × 60 floats × 4 bytes = **240 KB**. Negligible.
-
-**Why:** Fixed memory, no malloc, no cleanup, O(1) insert, cache-friendly. implot reads float arrays directly — no conversion needed.
-
-**Alternative — dynamic linked list per PID:** malloc per sample, pointer chasing per read, GC burden. No real benefit at this scale.
-
----
-
-### 5. Immediate Mode UI (Dear ImGui)
-
-Every frame you declare what the UI looks like. ImGui figures out what changed and renders only that.
 
 ```c
-// retained mode (Qt/GTK style) — you manage widget state:
-void on_cpu_changed(float new_val) {
-    cpu_label->setText(QString::number(new_val));
-}
+typedef struct {
+    float cpu_history[HISTORY_LEN];
+    int   history_head;
+} ProcessHistory;
 
-// immediate mode (ImGui) — just declare it every frame:
-ImGui::Text("CPU: %.1f%%", proc->cpu_percent);
+// write:
+h->cpu_history[h->history_head] = new_cpu;
+h->history_head = (h->history_head + 1) % HISTORY_LEN;
+
+// implot reads float* directly — no conversion needed
+ImPlot_PlotLine("##cpu", h->cpu_history, HISTORY_LEN, ...);
+```
+
+**Memory:** 1024 PIDs × 60 floats × 4 bytes = **240KB**. Fits in M4 L2 cache entirely (64MB per performance core).
+
+**Why not a linked list:** malloc per sample, pointer chasing per read, cleanup on process death. No benefit at this scale.
+
+---
+
+### 6. Immediate Mode UI
+
+Every frame you declare what the UI contains. ImGui figures out what changed.
+
+```c
+// retained mode — you manage state explicitly:
+void on_cpu_updated(float v) { label->setText(v); }
+
+// immediate mode — just declare it each frame:
+igText("CPU: %.1f%%", proc->cpu_percent); // that's it
 ```
 
 ```mermaid
 graph LR
-    data["Snapshot\n(current data)"]
-    frame["every frame\n~60fps"]
-    imgui["ImGui declares\nentire UI"]
-    render["GPU renders\nonly what changed"]
+    snap["Snapshot\n(current data)"]
+    frame["frame tick\n~60fps"]
+    decl["ImGui declares\nentire UI"]
+    gpu["GPU renders\ndelta only"]
 
-    data --> frame --> imgui --> render
-    render -->|next frame| frame
+    snap --> frame --> decl --> gpu --> frame
 ```
 
-**Why:** Live dashboards are a perfect fit. No change events, no widget state sync, no observer wiring. Just pass the current data every frame.
-
-**Alternative rejected — Qt:** Native look, excellent widgets. But C++, retained mode, requires change events for every live value. Overkill for a monitor tool.
+**Why:** Live dashboards are a perfect match. No change events, no widget state sync. Pass the current snapshot, done.
 
 ---
 
-### 6. Finite State Machine
+### 7. Finite State Machine
 
-The app has explicit states. UI components gate their rendering on state.
+The app has exactly four states. UI components gate rendering on state.
 
 ```mermaid
 stateDiagram-v2
     [*] --> LOADING
-    LOADING --> RUNNING : first snapshot ready
+    LOADING --> RUNNING : first kqueue snapshot ready
     RUNNING --> SELECTED : user clicks a process
-    SELECTED --> RUNNING : user clicks away or process dies
-    RUNNING --> ERROR : poll fails 3x consecutively
-    SELECTED --> ERROR : poll fails 3x consecutively
+    SELECTED --> RUNNING : process dies or user deselects
+    RUNNING --> ERROR : kqueue fails or 3 consecutive snapshot errors
+    SELECTED --> ERROR : same
     ERROR --> LOADING : user clicks retry
 ```
 
@@ -239,23 +351,268 @@ typedef enum {
 } AppState;
 ```
 
-Each UI component checks state before rendering:
+Each panel checks state before rendering:
 ```c
-if (poll_state() == STATE_SELECTED) {
+if (poll_state() == STATE_SELECTED)
     ui_detail_panel(selected_pid);
+```
+
+**Why:** Eliminates scattered `if (pid != -1 && snap != NULL && loaded)` guards. One source of truth.
+
+---
+
+### 8. Metal Compute Layer
+
+The treemap rendering uses a Metal compute kernel for color mapping. CPU computes rectangle positions (squarified algorithm, see below). GPU maps cpu% → RGBA heat color for each box in parallel.
+
+```c
+// CPU writes this to MTLBuffer:
+typedef struct {
+    float x, y, w, h;   // rectangle (normalized 0..1)
+    float cpu_percent;   // 0..100
+    float mem_bytes;     // for future use
+} TreemapNode;
+
+// GPU reads it, writes RGBA per node:
+kernel void color_map(
+    device const TreemapNode *nodes [[buffer(0)]],
+    device float4 *colors           [[buffer(1)]],
+    uint id [[thread_position_in_grid]]
+) {
+    float t = nodes[id].cpu_percent / 100.0;
+    // cool (blue) → warm (red) heat map
+    colors[id] = float4(t, 0.2, 1.0 - t, 1.0);
 }
 ```
 
-**Why:** Eliminates scattered `if (selected_pid != -1 && snapshot != NULL && ...)` guards everywhere. One canonical truth about what the app is doing.
+**Zero copy on M4:** `MTLResourceStorageModeShared` means the CPU-written `TreemapNode[]` array and the GPU-read buffer are the same physical memory. No `memcpy`, no DMA transfer.
 
-**Alternative — boolean flags:**
-```c
-bool is_loaded;
-bool has_selection;
-bool has_error;
-// 2^3 = 8 possible combinations, most invalid
+---
+
+## Algorithms In Depth
+
+### Squarified Treemap
+
+**Problem:** Given N processes with sizes (memory bytes), fill a rectangle such that each process gets area proportional to its size, and rectangles are as square as possible.
+
+**Why aspect ratio matters:**
+
 ```
-Works until you have 4 flags and 16 combinations, some of which are contradictory.
+Bad (slice algorithm) — thin slivers are hard to click and read:
+┌─┬─┬──────┬───────────────────┐
+│ │ │      │                   │
+│A│B│  C   │         D         │
+│ │ │      │                   │
+└─┴─┴──────┴───────────────────┘
+
+Good (squarified) — readable, clickable boxes:
+┌───────┬───────┐
+│   A   │   B   │
+├───┬───┼───────┤
+│ C │   D       │
+└───┴───────────┘
+```
+
+**The algorithm — step by step:**
+
+Input: sorted list of values (largest first), a rectangle W×H.
+
+```
+function squarify(values[], rect):
+    row = []
+    for each value v in values:
+        candidate_row = row + [v]
+        if row is empty OR worst_ratio(candidate_row, rect) <= worst_ratio(row, rect):
+            row = candidate_row        // adding v improves ratios → keep going
+        else:
+            layout_row(row, rect)      // adding v made it worse → commit row
+            rect = remaining_rect      // shrink rect by committed row height
+            row = [v]                  // start new row with v
+    layout_row(row, rect)              // commit final row
+```
+
+**Worst ratio formula:**
+
+For a row with sum `s`, largest value `rmax`, smallest `rmin`, strip width `w`:
+
+```
+worst_ratio = max(w² × rmax / s²,   s² / w² × rmin)
+```
+
+This captures both extremes — a huge value making a tall thin box, and a tiny value making a wide flat box.
+
+**Concrete example:**
+
+Values: `[6, 6, 4, 3, 2, 2, 1]`, rectangle `6×4 = 24`.  
+Total = 24, so each unit of value = 1 unit of area.
+
+```
+Step 1: try row=[6], w=6, s=6, rmax=rmin=6
+  worst = max(36×6/36, 36/36×6) = max(6, 6) = 6.0
+
+Step 2: try row=[6,6], w=6, s=12, rmax=rmin=6
+  worst = max(36×6/144, 144/36×6) = max(1.5, 0.67) = 1.5  ← better, keep going
+
+Step 3: try row=[6,6,4], w=6, s=16, rmax=6, rmin=4
+  worst = max(36×6/256, 256/36×4) = max(0.84, 1.78) = 1.78 ← worse! commit [6,6]
+
+Commit row [6,6]:
+  strip height = s/w = 12/6 = 2
+  box A: x=0, y=0, w=3, h=2  (area=6)
+  box B: x=3, y=0, w=3, h=2  (area=6)
+  remaining rect: 6×2
+
+Repeat for [4,3,2,2,1] in 6×2 rect...
+
+Final layout:
+┌───┬───┬──┬──┬─┐
+│ A │ B │C │D │E│
+│   │   ├──┼──┤ │
+│   │   │F │G │ │
+└───┴───┴──┴──┴─┘
+```
+
+**Complexity:** O(n log n) — dominated by the initial sort. The layout pass itself is O(n).
+
+**C implementation sketch (~80 lines):**
+
+```c
+typedef struct { float x, y, w, h; } Rect;
+
+static float worst_ratio(float *vals, int n, float w) {
+    float s = 0;
+    for (int i = 0; i < n; i++) s += vals[i];
+    float rmax = vals[0], rmin = vals[n-1]; // pre-sorted
+    float a = (w * w * rmax) / (s * s);
+    float b = (s * s) / (w * w * rmin);
+    return fmaxf(a, b);
+}
+
+void squarify(float *vals, int n, Rect rect, TreemapNode *out) {
+    // ... recursive subdivision
+    // see treemap.c for full implementation
+}
+```
+
+---
+
+### Delta CPU Calculation
+
+Every OS gives cumulative CPU ticks since process start. You compute percentage from the delta between two snapshots.
+
+```
+cpu_ticks_per_second = (ticks_b - ticks_a) / elapsed_seconds
+cpu_percent = cpu_ticks_per_second / ticks_per_second_total * 100
+```
+
+On macOS via `proc_pidinfo` with `PROC_PIDTASKINFO`:
+
+```c
+struct proc_taskinfo ti;
+proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, sizeof(ti));
+// ti.pti_total_user   — user space ticks (nanoseconds on macOS)
+// ti.pti_total_system — kernel ticks (nanoseconds on macOS)
+
+uint64_t total_ticks = ti.pti_total_user + ti.pti_total_system;
+// delta between two snapshots:
+uint64_t delta_ticks = total_ticks - prev_ticks;
+double   delta_time  = current_time - prev_time; // seconds
+float    cpu_pct     = (float)(delta_ticks / 1e9 / delta_time * 100.0);
+```
+
+```mermaid
+timeline
+    title Delta CPU Timeline
+    t=0.0s  : kqueue fires → snapshot A recorded
+            : store pti_total per PID
+    t=0.5s  : kqueue fires → snapshot B recorded
+            : Δticks = B.ticks - A.ticks
+            : cpu% = Δticks / 0.5s / 1e9 * 100
+    t=1.2s  : kqueue fires → snapshot C recorded
+            : Δticks = C.ticks - B.ticks
+            : cpu% = Δticks / 0.7s / 1e9 * 100
+```
+
+Note: with kqueue the interval is variable (not fixed 500ms). Use actual elapsed time, not an assumed constant.
+
+---
+
+### Shannon Entropy (future)
+
+Not used in v0.1 but worth knowing — it's how you'd add an "entropy column" to the process list, indicating how chaotic a process's CPU usage pattern is.
+
+```
+H = -Σ p(x) × log₂(p(x))
+```
+
+Applied to the ring buffer history:
+
+```c
+float entropy(float *history, int n) {
+    // bucket cpu% into bins
+    float bins[10] = {0};
+    for (int i = 0; i < n; i++)
+        bins[(int)(history[i] / 10.0f)]++;
+    float h = 0;
+    for (int b = 0; b < 10; b++) {
+        float p = bins[b] / n;
+        if (p > 0) h -= p * log2f(p);
+    }
+    return h; // 0 = perfectly steady, 3.32 = completely random
+}
+```
+
+High entropy = erratic process. Low entropy = steady or idle. Useful for spotting misbehaving background processes.
+
+---
+
+### Metal Color Mapping Kernel
+
+The heat color mapping runs as a parallel GPU kernel. Each thread handles one treemap node.
+
+**Heat ramp:** blue (cold, 0% CPU) → green → yellow → red (hot, 100% CPU).
+
+```metal
+// treemap.metal
+kernel void color_map(
+    device const TreemapNode *nodes [[buffer(0)]],
+    device float4            *colors [[buffer(1)]],
+    uint id [[thread_position_in_grid]]
+) {
+    float t = clamp(nodes[id].cpu_percent / 100.0, 0.0, 1.0);
+
+    // 3-stop gradient: blue → yellow → red
+    float3 cold   = float3(0.2, 0.4, 1.0);  // blue
+    float3 warm   = float3(1.0, 0.9, 0.0);  // yellow
+    float3 hot    = float3(1.0, 0.1, 0.1);  // red
+
+    float3 color;
+    if (t < 0.5)
+        color = mix(cold, warm, t * 2.0);
+    else
+        color = mix(warm, hot, (t - 0.5) * 2.0);
+
+    colors[id] = float4(color, 1.0);
+}
+```
+
+**Dispatch on CPU:**
+
+```c
+// nodes already in MTLBuffer (shared memory, no copy)
+id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+[enc setComputePipelineState:pipeline];
+[enc setBuffer:node_buf offset:0 atIndex:0];
+[enc setBuffer:color_buf offset:0 atIndex:1];
+
+MTLSize grid = MTLSizeMake(node_count, 1, 1);
+MTLSize group = MTLSizeMake(MIN(node_count, 64), 1, 1);
+[enc dispatchThreads:grid threadsPerThreadgroup:group];
+[enc endEncoding];
+[cmd commit];
+```
+
+For 1024 processes all colors are computed in a single GPU dispatch — one frame.
 
 ---
 
@@ -263,118 +620,55 @@ Works until you have 4 flags and 16 combinations, some of which are contradictor
 
 ### Entity-Component System (ECS)
 
-Split `ProcessInfo` into separate flat arrays per attribute instead of a fat struct.
+Split `ProcessInfo` into separate flat arrays per attribute.
 
 ```c
-// ECS style — each attribute in its own array
+// ECS — cache friendly for single-attribute ops
 int    pids[MAX_PROCESSES];
-float  cpu[MAX_PROCESSES];   // sorting only touches this array
+float  cpu[MAX_PROCESSES];
 size_t mem[MAX_PROCESSES];
 
-// current style — fat struct
-ProcessInfo procs[MAX_PROCESSES]; // sorting touches whole struct
+// current — fat struct
+ProcessInfo procs[MAX_PROCESSES];
 ```
 
-**Pro:** Cache-friendly when operating on one attribute at a time (e.g. sorting by CPU only reads the `cpu[]` array). Foundation of Bevy's architecture — you know this pattern.
-
-**Con:** At 1024 processes the cache benefit is unmeasurable. The fat struct fits in L2 cache entirely. Adds indirection and code complexity for zero real gain at this scale.
-
-**Use if:** You scaled to 100k+ processes or needed SIMD operations across the data.
+**Rejected because:** At 1024 processes the fat struct fits in M4 L2 cache (64MB) entirely. ECS cache benefit requires tens of thousands of entities and SIMD ops across the data. Neither applies here.
 
 ---
 
 ### Observer / Event Bus
 
-A central bus where subsystems publish and subscribe to events.
+Central bus where components publish and subscribe.
 
 ```c
-// publisher
 event_bus_publish(EVENT_PROCESS_DIED, &pid);
-
-// subscribers react automatically
-// detail_panel clears its view
-// treemap removes the box
-// process_list removes the row
+// all subscribers react automatically
 ```
 
-```mermaid
-graph TD
-    poll["poll.c"] -->|EVENT_PROCESS_DIED| bus["event bus"]
-    bus --> list["process_list.c"]
-    bus --> detail["detail_panel.c"]
-    bus --> treemap["treemap.c"]
-```
-
-**Pro:** Perfect decoupling. Components don't know each other exist. Adding a new panel means subscribing, not editing existing code.
-
-**Con:** Implicit control flow. Hard to debug ("who consumed this event and in what order?"). For three panels it's overengineering.
-
-**Deferred to:** v0.5 — worth adding when process spawn/death needs broadcasting to many subsystems and polling misses short-lived processes.
+**Rejected because:** Implicit control flow, hard to debug. With three UI panels the wiring is trivial to do directly. Worth revisiting if panels grow beyond ~6.
 
 ---
 
 ### Command Pattern
 
-Every user action is a struct that can be queued, executed, and undone.
+Every action is a struct that can be undone.
 
 ```c
-typedef enum { CMD_KILL, CMD_SORT, CMD_PIN } CommandType;
-
-typedef struct {
-    CommandType type;
-    int         pid;
-} Command;
-
-void command_execute(Command *cmd);
-void command_undo(Command *cmd);
+typedef struct { CommandType type; int pid; } Command;
 ```
 
-**Pro:** Undo/redo for free. Action replay for testing. Clean separation of intent ("kill this PID") from execution ("call proc_terminate").
-
-**Con:** Heavy boilerplate in C. Natural in OOP, awkward in plain C. Only valuable if you add destructive multi-step workflows.
-
-**Use if:** You add undo for kill actions, session recording, or macro scripting.
+**Rejected because:** Heavy boilerplate in C. Only valuable with undo/redo or action replay. PulsOS has one destructive action (kill) and no undo requirement.
 
 ---
 
-### Plugin / Panel Registry
+### 500ms Timer Polling
 
-Panels register themselves at startup instead of being hardcoded in `app.c`.
+Simple `usleep(500000)` loop calling `proc_get_snapshot()` repeatedly.
 
-```c
-// instead of hardcoded calls in app.c:
-ui_register_panel("Process List", &process_list_panel);
-ui_register_panel("Treemap",      &treemap_panel);
-ui_register_panel("Detail",       &detail_panel);
-
-// app.c just iterates:
-for (int i = 0; i < panel_count; i++)
-    panels[i].render();
-```
-
-**Pro:** Adding a new view doesn't touch `app.c`. Supports user-configurable layouts.
-
-**Con:** Requires a stable `Panel` interface contract before you know what panels need. Premature at v0.1 — the contract will change as you build each panel.
-
-**Deferred to:** v1.0 if user-configurable layouts become a goal.
-
----
-
-### Push Model (kqueue)
-
-Instead of polling every 500ms, subscribe to OS process events via macOS `kqueue`.
-
-```c
-struct kevent ev;
-EV_SET(&ev, pid, EVFILT_PROC, EV_ADD, NOTE_EXIT | NOTE_FORK, 0, NULL);
-kevent(kq, &ev, 1, NULL, 0, NULL); // OS notifies on process events
-```
-
-**Pro:** Zero CPU when nothing changes. Catches short-lived processes that a 500ms poll would miss entirely.
-
-**Con:** Requires tracking each PID individually. More complex setup. Polling is simpler and correct enough for a desktop monitor.
-
-**Deferred to:** v0.5 alongside Linux backend (`inotify` on `/proc`) and Windows (`WaitForMultipleObjects`).
+**Rejected because:**
+- Wastes CPU every 500ms even when nothing changed
+- Misses processes that spawn and exit within the window
+- kqueue is the correct macOS primitive for this exact use case
 
 ---
 
@@ -382,41 +676,48 @@ kevent(kq, &ev, 1, NULL, 0, NULL); // OS notifies on process events
 
 ```mermaid
 flowchart LR
-    kernel["macOS kernel\nproc_pidinfo()"]
-    macos["proc_macos.c"]
-    poll["poll.c\nΔcpu · swap · ring buffer"]
+    kernel["macOS kernel"]
+    kq["kqueue fd\n(efficiency cores)"]
+    gcd["GCD\nQOS_CLASS_BACKGROUND"]
+    macos["proc_macos.c\nproc_pidinfo()"]
+    poll["poll.c\nΔcpu · swap · ring buf"]
     fsm["AppState FSM"]
+    mtl["MTLBuffer\nshared memory"]
+    gpu["treemap.metal\ncolor kernel"]
     list["process_list.c"]
     detail["detail_panel.c"]
-    treemap["treemap.c"]
+    treemap["treemap.c\nsquarified layout"]
 
-    kernel -->|500ms| macos --> poll
+    kernel -->|"NOTE_EXIT\nNOTE_FORK"| kq
+    kq --> gcd --> macos --> poll
     poll -->|Snapshot| list
     poll -->|ring buffer| detail
     poll -->|Snapshot| treemap
-    fsm -->|gates render| list
-    fsm -->|gates render| detail
-    fsm -->|gates render| treemap
+    treemap -->|TreemapNode[]| mtl
+    mtl --> gpu -->|RGBA[]| treemap
+    fsm -->|gates render| list & detail & treemap
 ```
 
 ---
 
 ## Threading Model
 
-**v0.1 — single threaded.** Poll runs on the main thread before the ImGui frame.
+```mermaid
+graph TD
+    main["main thread\nperformance core\nImGui + Metal encode"]
+    bg["QOS_CLASS_BACKGROUND\nefficiency core\nkqueue blocking wait"]
+    ut["QOS_CLASS_UTILITY\nefficiency core\nproc_pidinfo() calls\ndouble buffer swap"]
 
+    bg -->|"event fires\ndispatch_async"| ut
+    ut -->|"swap done\ndispatch_async main"| main
+    main -->|"next frame"| main
 ```
-main loop iteration:
-  1. poll_tick()        ← fills write buffer, swaps
-  2. imgui_new_frame()
-  3. render_ui()        ← reads read buffer
-  4. imgui_render()
-  5. sdl_swap_window()
-```
 
-**Why:** No mutex complexity. A 500ms poll completes in microseconds — it will never stall a 60fps frame.
+- **Main thread** — ImGui frame, Metal command encoding, FSM transitions
+- **Background queue** — blocks on `kevent()`, fires on OS process events
+- **Utility queue** — does the actual `proc_pidinfo()` work, writes to buffer, swaps
 
-**Upgrade path to v0.5 threading:** Move `poll_tick()` to a `pthread` background thread. The double buffer's atomic swap is already designed for this — no other code changes needed. That's why it was added now.
+Three queues, zero mutexes. The atomic swap is the only synchronization primitive.
 
 ---
 
@@ -430,20 +731,25 @@ graph TD
     detail["ui/detail_panel.c"]
     treemap["ui/treemap.c"]
     poll["core/poll.c"]
-    ph["core/process.h\n★ everyone includes this"]
+    ph["core/process.h\n★ the contract"]
     macos["platform/proc_macos.c"]
+    mtlctx["gpu/metal_context.c"]
+    shader["gpu/treemap.metal"]
 
     main --> app
     app --> list & detail & treemap
     list & detail & treemap --> poll
+    treemap --> mtlctx
+    mtlctx --> shader
     poll --> macos
     poll & list & detail & treemap & macos --> ph
 
     style ph fill:#8b1a1a,color:#fff
+    style shader fill:#4a0080,color:#fff
 ```
 
-`process.h` is the foundation. If its structs change, everything recompiles. **Keep it stable** — design it carefully before writing any `.c` file.
+`process.h` is the foundation — if its structs change, everything recompiles. Design it carefully. It is the first file we implement.
 
 ---
 
-*PulsOS — Felipe Carvajal Brown · v0.1 scaffold*
+*PulsOS — Felipe Carvajal Brown · M4 MacBook Air · plain C + Metal*
