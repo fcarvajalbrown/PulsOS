@@ -43,4 +43,4 @@ docs/sessions/*.aux
 docs/sessions/*.log
 docs/sessions/*.out
 docs/sessions/*.toc
-docs/sessions/*.pdf
+docs/sessions/*.pdfvendor/
