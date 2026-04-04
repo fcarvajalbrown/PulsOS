@@ -42,6 +42,13 @@
     - [Pros and cons per option for PulsOS specifically](#pros-and-cons-per-option-for-pulsos-specifically)
     - [Summary](#summary)
   - [File Dependency Graph](#file-dependency-graph)
+  - [*PulsOS — Felipe Carvajal Brown · M4 MacBook Air · plain C + Metal*](#pulsos--felipe-carvajal-brown--m4-macbook-air--plain-c--metal)
+  - [Pointers — Why, When, and How We Use Them](#pointers--why-when-and-how-we-use-them)
+    - [What a pointer is](#what-a-pointer-is)
+    - [Why C needs pointers at all](#why-c-needs-pointers-at-all)
+    - [Every pointer in PulsOS and why it's there](#every-pointer-in-pulsos-and-why-its-there)
+    - [The three rules we follow in PulsOS](#the-three-rules-we-follow-in-pulsos)
+    - [Pointer vs value — quick decision guide](#pointer-vs-value--quick-decision-guide)
 
 ---
 
@@ -844,3 +851,147 @@ graph TD
 ---
 
 *PulsOS — Felipe Carvajal Brown · M4 MacBook Air · plain C + Metal*
+---
+
+## Pointers — Why, When, and How We Use Them
+
+> This section is written for someone new to C. If you already know pointers skip it. If you don't, read it carefully — pointers are the single most important concept in this codebase.
+
+### What a pointer is
+
+Every variable in your program lives somewhere in memory. That location has an address — a number that tells the CPU where to find the data.
+
+A pointer is just a variable that stores an address instead of a value.
+
+```c
+int x = 42;       // x holds the value 42
+int *p = &x;      // p holds the ADDRESS of x
+                  // & means "give me the address of"
+printf("%d", *p); // * means "go to that address and read what's there"
+                  // prints 42
+```
+
+```
+Memory:
+address  0x1000: [ 42 ]   ← x lives here
+address  0x1008: [0x1000] ← p lives here, stores x's address
+```
+
+### Why C needs pointers at all
+
+Two reasons that come up constantly in PulsOS:
+
+**1. Functions can't modify variables in other functions without them**
+
+```c
+// this does NOT work — n is a copy, caller's variable unchanged
+void broken(int n) { n = 99; }
+
+// this WORKS — we pass the address, function modifies the original
+void fixed(int *n) { *n = 99; }
+
+int x = 0;
+fixed(&x); // x is now 99
+```
+
+**2. Passing large data without copying it**
+
+```c
+// BAD — copies the entire Snapshot struct (megabytes) onto the stack
+void render(Snapshot snap) { ... }
+
+// GOOD — passes only an 8-byte address, no copy
+void render(const Snapshot *snap) { ... }
+```
+
+`const` before the type means "I promise not to modify what this points to." It's a contract — the compiler enforces it.
+
+### Every pointer in PulsOS and why it's there
+
+**`ProcessInfo *p = &out->procs[out->count]`** — in `proc_macos.c`
+
+We're filling a slot inside the output array. Instead of writing `out->procs[out->count].pid = ...` on every line, we grab a pointer to that slot once and write through it. Cleaner, same result.
+
+```c
+ProcessInfo *p = &out->procs[out->count]; // point at the slot
+p->pid   = pid;     // fill it
+p->alive = true;    // same slot
+```
+
+---
+
+**`int proc_get_snapshot(Snapshot *out)`** — in `proc_platform.h`
+
+The snapshot is large (~1MB). We can't return it by value — that would copy it. Instead we pass a pointer to a buffer the caller owns, and the function fills it in place. The caller decides where the memory lives, the function just writes to it.
+
+---
+
+**`const Snapshot *poll_read(void)`** — in `poll.h`
+
+Returns a pointer to the live buffer. The UI reads through this pointer every frame. No copy, no allocation — the UI is looking directly at the data poll wrote. `const` prevents the UI from accidentally modifying the shared buffer.
+
+---
+
+**`void ui_process_list(int *selected_pid)`** — in `process_list.h`
+
+The list needs to tell `app.c` which PID the user clicked. It can't return it (return value is void). So we pass a pointer to `app.c`'s `selected_pid` variable and the list writes to it directly.
+
+```c
+// in app.c
+int selected_pid = -1;
+ui_process_list(&selected_pid); // list can now modify our variable
+```
+
+---
+
+**`MetalContext *metal_init(void)`** — in `metal_context.h`
+
+`MetalContext` is a struct containing GPU objects. We allocate it with `malloc()` on the heap and return a pointer to it. Why heap and not stack? Because it needs to outlive the function that created it and be shared across the whole app lifetime.
+
+```c
+MetalContext *ctx = calloc(1, sizeof(MetalContext)); // heap allocation
+// ... fill ctx ...
+return ctx; // caller holds the pointer, owns the memory
+```
+
+The caller is responsible for calling `metal_shutdown(ctx)` which calls `free(ctx)`. This is manual memory management — there is no garbage collector in C.
+
+---
+
+**`ImDrawList *dl = igGetWindowDrawList()`** — in `treemap.c`
+
+ImGui owns this draw list internally. It gives us a pointer so we can append drawing commands to it. We don't own this memory — we must not free it. This is a borrowed pointer, valid only for the current frame.
+
+---
+
+### The three rules we follow in PulsOS
+
+**1. `const` if you're only reading**
+```c
+const Snapshot *snap = poll_read(); // reading only — compiler stops accidental writes
+```
+
+**2. Never free memory you didn't allocate**
+```c
+// poll_read() returns a pointer to a static buffer — never free this
+const Snapshot *snap = poll_read();
+free(snap); // WRONG — crash
+```
+
+**3. Check for NULL before using**
+```c
+metal = metal_init();
+if (!metal) { /* handle gracefully */ }
+// metal could be NULL if GPU init failed — using it would crash
+```
+
+### Pointer vs value — quick decision guide
+
+| Situation | Use |
+|---|---|
+| Passing a large struct to a function | Pointer |
+| Function needs to modify caller's variable | Pointer |
+| Returning heap-allocated object | Pointer |
+| Small value, function doesn't modify it | Value |
+| Sharing data between threads | Pointer to shared buffer |
+| Borrowed reference, don't own it | `const` pointer |
