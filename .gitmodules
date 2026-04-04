@@ -1,0 +1,6 @@
+[submodule "vendor/cimgui"]
+	path = vendor/cimgui
+	url = https://github.com/cimgui/cimgui
+[submodule "vendor/implot"]
+	path = vendor/implot
+	url = https://github.com/epezent/implot
