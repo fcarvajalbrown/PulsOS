@@ -1,6 +1,7 @@
 #include "process_list.h"
 #include "../core/poll.h"
 #include "../core/process.h"
+#include "../core/fsm.h"
 
 #include "imgui.h"
 #include <stdio.h>
@@ -47,8 +48,15 @@ void ui_process_list(int *selected_pid) {
         char label[270];
         snprintf(label, sizeof(label), "%s##%d", p->name, p->pid);
         if (ImGui::Selectable(label, is_selected,
-                ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 0)))
-            *selected_pid = is_selected ? -1 : p->pid;
+                ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, 0))) {
+            if (is_selected) {
+                *selected_pid = -1;
+                fsm_transition(EVT_PID_DESELECTED);
+            } else {
+                *selected_pid = p->pid;
+                fsm_transition(EVT_PID_SELECTED);
+            }
+        }
     }
 
     ImGui::EndTable();

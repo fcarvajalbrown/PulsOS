@@ -2,6 +2,7 @@
 #include "app_ui.h"
 #include "../core/poll.h"
 #include "../gpu/metal_context.h"
+#include "../core/fsm.h"
 
 #include <SDL2/SDL.h>
 #include <stdbool.h>
@@ -57,6 +58,7 @@ int app_run(void) {
         fprintf(stderr, "pulsos: Metal init failed — treemap CPU fallback active\n");
 
     app_ui_set_metal(metal);
+    fsm_init();
     poll_init();
 
     bool running = true;

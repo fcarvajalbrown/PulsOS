@@ -3,6 +3,7 @@
 #include "detail_panel.h"
 #include "treemap.h"
 #include "../core/poll.h"
+#include "../core/fsm.h"
 #include "../core/process.h"
 
 #include <SDL2/SDL.h>
@@ -11,6 +12,7 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
+#include <implot.h>
 
 #define DETAIL_H 220
 #define LIST_W   340
@@ -20,6 +22,7 @@ static MetalContext *s_metal = NULL;
 int app_ui_init(void *sdl_window, void *gl_ctx) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImPlot::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
@@ -54,6 +57,7 @@ int app_ui_init(void *sdl_window, void *gl_ctx) {
 void app_ui_shutdown(void) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
+    ImPlot::DestroyContext();
     ImGui::DestroyContext();
 }
 
@@ -72,7 +76,7 @@ void app_ui_new_frame(void) {
 }
 
 void app_ui_render(int w, int h, int *selected_pid) {
-    AppState state = poll_state();
+    AppState state = fsm_state();
 
     ImGuiWindowFlags bg_flags =
         ImGuiWindowFlags_NoTitleBar          |
@@ -96,7 +100,10 @@ void app_ui_render(int w, int h, int *selected_pid) {
             ImGui::SetCursorPos(ImVec2((float)w * 0.5f - 80, (float)h * 0.5f));
             ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Error reading process list.");
             ImGui::SameLine(0, 10);
-            if (ImGui::Button("Retry", ImVec2(60, 0))) poll_init();
+            if (ImGui::Button("Retry", ImVec2(60, 0))) {
+                fsm_transition(EVT_RETRY);
+                poll_init();
+            }
             break;
 
         case STATE_RUNNING:
@@ -128,7 +135,10 @@ void app_ui_render(int w, int h, int *selected_pid) {
                 bool found = false;
                 for (int i = 0; i < snap->count; i++)
                     if (snap->procs[i].pid == *selected_pid) { found = true; break; }
-                if (!found) *selected_pid = -1;
+                if (!found) {
+                    *selected_pid = -1;
+                    fsm_transition(EVT_PID_DIED);
+                }
             }
             break;
         }

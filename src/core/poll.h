@@ -6,6 +6,7 @@ extern "C" {
 
 
 #include "process.h"
+#include "fsm.h"
 
 void              poll_init(void);
 void              poll_shutdown(void);

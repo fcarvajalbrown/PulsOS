@@ -42,14 +42,6 @@ typedef struct {
     bool  active;            // slot in use
 } ProcessHistory;
 
-// app FSM — one source of truth for what the app is doing
-typedef enum {
-    STATE_LOADING,           // waiting for first kqueue snapshot
-    STATE_RUNNING,           // normal operation, list visible
-    STATE_SELECTED,          // user selected a pid, detail panel open
-    STATE_ERROR              // kqueue or snapshot failed 3x
-} AppState;
-
 // treemap node — written by CPU squarified layout, read by Metal kernel
 // layout: normalized coords (0..1), Metal maps to screen pixels
 typedef struct {

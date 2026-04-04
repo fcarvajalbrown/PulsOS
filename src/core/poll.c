@@ -12,6 +12,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include "fsm.h"
 
 // double buffer — poll writes, UI reads, no mutex needed
 static Snapshot       buffers[2];
@@ -21,7 +22,6 @@ static atomic_int     write_idx = 0;
 static ProcessHistory histories[MAX_PROCESSES];
 static int            history_count = 0;
 
-static AppState       app_state   = STATE_LOADING;
 static atomic_int     fail_count  = 0;
 static int            kq          = -1;
 
@@ -117,19 +117,18 @@ static void do_snapshot(void) {
 
     int result = proc_get_snapshot(buf);
     if (result < 0) {
-        if (atomic_fetch_add(&fail_count, 1) >= 2)
-            app_state = STATE_ERROR;
+    if (atomic_fetch_add(&fail_count, 1) >= 2)
+        fsm_transition(EVT_SNAPSHOT_FAIL);
         return;
     }
 
     atomic_store(&fail_count, 0);
+    fsm_transition(EVT_SNAPSHOT_OK);
     compute_delta_cpu(buf);
     register_all_pids(buf); // register any new pids that appeared
 
     atomic_store(&write_idx, 1 - wi); // atomic swap — UI now reads new buffer
 
-    if (app_state == STATE_LOADING)
-        app_state = STATE_RUNNING;
 }
 
 // --- kqueue event loop — runs on event_queue (efficiency cores) ---
@@ -164,7 +163,7 @@ void poll_init(void) {
     memset(prev_pids,  0, sizeof(prev_pids));
 
     kq = kqueue();
-    if (kq < 0) { app_state = STATE_ERROR; return; }
+    if (kq < 0) { fsm_transition(EVT_SNAPSHOT_FAIL); return; }
 
     // efficiency core queues
     dispatch_queue_attr_t bg_attr = dispatch_queue_attr_make_with_qos_class(
@@ -202,4 +201,4 @@ const ProcessHistory *poll_history(int pid) {
     return NULL;
 }
 
-AppState poll_state(void) { return app_state; }
+AppState poll_state(void) { return fsm_state(); }

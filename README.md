@@ -58,6 +58,24 @@ This project exists to understand how macOS process monitoring works at the sysc
 
 ---
 
+## Architecture
+
+PulsOS uses a strict layered architecture with a pure C core and thin C++ shims for ImGui:
+
+```
+Pure C layer (logic, data, platform)
+    app.c · poll.c · fsm.c · treemap.c · process_list.c · detail_panel.c · proc_macos.c
+
+Thin C++ shim layer (ImGui calls only)
+    app_ui.cpp · treemap_ui.cpp · process_list_ui.cpp · detail_panel_ui.cpp · implot_wrapper.cpp
+```
+
+Application state is managed by a **Finite State Machine** with an explicit transition table in `fsm.c`. All state changes go through `fsm_transition(event)` — no module writes state directly.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for full architecture decision records and algorithm documentation.
+
+---
+
 ## Building
 
 Requires macOS with Xcode Command Line Tools and Homebrew.
@@ -96,6 +114,8 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for architecture decision rec
 - [x] Detail panel scaffold
 - [x] Retina and HiDPI font scaling
 - [x] CMake build with Metal shader compilation step
+- [x] Pure C core + thin C++ ImGui shim architecture
+- [x] FSM with explicit transition table (`fsm.c`)
 
 ### Planned
 - [ ] CPU history ring buffer and sparklines in detail panel
@@ -110,6 +130,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for architecture decision rec
 - [ ] Windows backend via WMI
 - [ ] GitHub Actions CI matrix (macOS + Linux)
 - [ ] macOS `.app` bundle packaging
+- [ ] Live ARM64 disassembly panel via `task_for_pid` + Capstone
 
 ---
 

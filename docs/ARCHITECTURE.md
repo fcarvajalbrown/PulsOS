@@ -58,6 +58,15 @@
     - [Pros](#pros)
     - [Cons](#cons)
     - [The rule](#the-rule)
+  - [If you find yourself writing an `if` statement, a `qsort`, or any data manipulation inside a `_ui.cpp` file, it belongs in the `.c` file instead. The shim calls the C function and passes the result to ImGui. That's it.](#if-you-find-yourself-writing-an-if-statement-a-qsort-or-any-data-manipulation-inside-a-_uicpp-file-it-belongs-in-the-c-file-instead-the-shim-calls-the-c-function-and-passes-the-result-to-imgui-thats-it)
+  - [Finite State Machine — Transition Table Pattern](#finite-state-machine--transition-table-pattern)
+    - [What a Finite State Machine is](#what-a-finite-state-machine-is)
+    - [Why not just use if/else?](#why-not-just-use-ifelse)
+    - [The Transition Table — behavior as data](#the-transition-table--behavior-as-data)
+    - [Design pattern name](#design-pattern-name)
+    - [Where it lives in PulsOS](#where-it-lives-in-pulsos)
+    - [Why its own file and not inside app.c or poll.c](#why-its-own-file-and-not-inside-appc-or-pollc)
+    - [Mealy vs Moore — quick reference](#mealy-vs-moore--quick-reference)
 
 ---
 
@@ -1084,3 +1093,128 @@ Yes. The identical boundary is used in production engines. One documented real-w
 ### The rule
 
 If you find yourself writing an `if` statement, a `qsort`, or any data manipulation inside a `_ui.cpp` file, it belongs in the `.c` file instead. The shim calls the C function and passes the result to ImGui. That's it.
+---
+
+## Finite State Machine — Transition Table Pattern
+
+### What a Finite State Machine is
+
+A Finite State Machine (FSM) is a model of a system that can be in exactly one state at a time, and moves between states in response to events. "Finite" means the number of states is fixed and known at compile time.
+
+PulsOS is always in exactly one of these states:
+
+```
+LOADING → RUNNING → SELECTED
+                ↑       ↓
+              ERROR ←───┘
+```
+
+At any moment, the app is loading data, running normally, showing a selected process, or in an error state. Nothing else. This simplicity is the point.
+
+### Why not just use if/else?
+
+The naive approach:
+
+```c
+// scattered across app.c, app_ui.cpp, poll.c...
+if (state == STATE_RUNNING && user_clicked)
+    state = STATE_SELECTED;
+if (state == STATE_SELECTED && process_died)
+    state = STATE_RUNNING;
+if (snapshot_failed_3_times)
+    state = STATE_ERROR;
+```
+
+This works for 4 states. With 10 features added it becomes:
+- Transitions hidden inside unrelated functions
+- No single place to audit what is and isn't legal
+- Easy to accidentally transition from ERROR → SELECTED without going through RUNNING first
+- Untestable without running the whole app
+
+### The Transition Table — behavior as data
+
+Instead of encoding transitions in control flow, we encode them in a table:
+
+```c
+typedef struct {
+    AppState  from;
+    FsmEvent  event;
+    AppState  to;
+} Transition;
+
+static const Transition table[] = {
+    { STATE_LOADING,  EVT_SNAPSHOT_OK,    STATE_RUNNING  },
+    { STATE_LOADING,  EVT_SNAPSHOT_FAIL,  STATE_ERROR    },
+    { STATE_RUNNING,  EVT_PID_SELECTED,   STATE_SELECTED },
+    { STATE_RUNNING,  EVT_SNAPSHOT_FAIL,  STATE_ERROR    },
+    { STATE_SELECTED, EVT_PID_DESELECTED, STATE_RUNNING  },
+    { STATE_SELECTED, EVT_PID_DIED,       STATE_RUNNING  },
+    { STATE_SELECTED, EVT_SNAPSHOT_FAIL,  STATE_ERROR    },
+    { STATE_ERROR,    EVT_RETRY,          STATE_LOADING  },
+};
+```
+
+The engine that drives it is trivial:
+
+```c
+void fsm_transition(FsmEvent event) {
+    for (int i = 0; i < TABLE_LEN; i++) {
+        if (table[i].from == current_state && table[i].event == event) {
+            current_state = table[i].to;
+            return;
+        }
+    }
+    // transition not in table — illegal, ignore or assert
+}
+```
+
+Any transition not in the table is silently ignored or caught by an assert. You cannot accidentally reach an undefined state.
+
+### Design pattern name
+
+This is the **State Machine** pattern, specifically the **State Transition Table (STT)** variant. In formal automata theory it's called a **Mealy machine** — output (next state) depends on both current state and the input event.
+
+The Gang of Four *State* pattern is the object-oriented version of the same idea — each state is a class with its own transition methods. The STT variant is the data-driven version preferred in C, embedded systems, and game engines because:
+
+- The entire behavior fits in one array you can read at a glance
+- Adding a new transition = adding one row to the table, nothing else
+- The engine loop never changes regardless of how many states you add
+
+### Where it lives in PulsOS
+
+```
+src/core/fsm.h   — AppState, FsmEvent enums, fsm_init(), fsm_transition(), fsm_state()
+src/core/fsm.c   — transition table + engine loop
+```
+
+It is a **core** module, not a UI module. Any file can fire an event:
+
+```c
+// poll.c — snapshot succeeded
+fsm_transition(EVT_SNAPSHOT_OK);
+
+// process_list.c — user clicked a pid
+fsm_transition(EVT_PID_SELECTED);
+
+// app.c — retry button pressed
+fsm_transition(EVT_RETRY);
+```
+
+Nobody reads or writes `app_state` directly. `fsm_state()` is the only getter. One source of truth.
+
+### Why its own file and not inside app.c or poll.c
+
+- `app.c` owns the SDL loop — it should not also own application logic
+- `poll.c` owns data acquisition — it should not also own UI state
+- `fsm.c` is testable with zero dependencies — no SDL, no ImGui, no Metal, no libproc
+- Every future feature (process kill, search, tree view) fires events into the FSM without knowing about each other
+
+### Mealy vs Moore — quick reference
+
+| | Mealy | Moore |
+|---|---|---|
+| Next state depends on | current state + event | current state + event |
+| Output depends on | current state + event | current state only |
+| Example | PulsOS FSM — what to render depends on state AND what just happened | traffic light — output (color) depends only on which state you're in |
+
+PulsOS is Mealy because what we render in STATE_SELECTED depends on both the state and which pid was selected (an event parameter).
