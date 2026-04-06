@@ -5,8 +5,10 @@
 #include "imgui.h"
 #include <stdio.h>
 
-static TreemapNode nodes[MAX_PROCESSES];
-static float       colors[MAX_PROCESSES * 4];
+#define OTHER_PID -1
+
+static TreemapNode nodes[MAX_PROCESSES + 1];
+static float       colors[(MAX_PROCESSES + 1) * 4];
 
 // HSV rank color fallback when Metal is unavailable
 static ImU32 rank_color(int rank, int total, float cpu_pct) {
@@ -41,7 +43,9 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
         if (pw < 1 || ph < 1) continue;
 
         ImU32 fill;
-        if (has_metal) {
+        if (nd->pid == OTHER_PID) {
+            fill = ImGui::ColorConvertFloat4ToU32(ImVec4(0.25f, 0.25f, 0.25f, 1.0f));
+        } else if (has_metal) {
             int ci = i * 4;
             fill = ImGui::ColorConvertFloat4ToU32(
                 ImVec4(colors[ci], colors[ci+1], colors[ci+2], colors[ci+3]));
@@ -49,7 +53,7 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
             fill = rank_color(i, node_count, nd->cpu_percent);
         }
 
-        if (*selected_pid == nd->pid)
+        if (*selected_pid == nd->pid && nd->pid != OTHER_PID)
             fill = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 0, 1));
 
         dl->AddRectFilled(ImVec2(px, py), ImVec2(px+pw, py+ph), fill, 0, 0);
@@ -58,11 +62,14 @@ void ui_treemap(MetalContext *metal, int *selected_pid) {
                 ImGui::ColorConvertFloat4ToU32(ImVec4(0, 0, 0, 0.5f)), 0, 0, 1.0f);
 
         if (pw > 30 && ph > 14) {
-            // find name for this pid
-            for (int j = 0; j < snap->count; j++) {
-                if (snap->procs[j].pid == nd->pid) {
-                    dl->AddText(ImVec2(px+3, py+3), 0xFFFFFFFF, snap->procs[j].name, NULL);
-                    break;
+            if (nd->pid == OTHER_PID) {
+                dl->AddText(ImVec2(px+3, py+3), 0xFFAAAAAA, "Other", NULL);
+            } else {
+                for (int j = 0; j < snap->count; j++) {
+                    if (snap->procs[j].pid == nd->pid) {
+                        dl->AddText(ImVec2(px+3, py+3), 0xFFFFFFFF, snap->procs[j].name, NULL);
+                        break;
+                    }
                 }
             }
         }

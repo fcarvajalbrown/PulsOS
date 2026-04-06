@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define OTHER_PID      -1    // sentinel pid for the "Other" catch-all box
+#define MIN_SHARE      0.005f // processes below 0.5% of total memory go into Other
+
 typedef struct { float x, y, w, h; } Rect;
 
 static float worst_ratio(float *vals, int n, float strip_w) {
@@ -24,10 +27,10 @@ static void layout_row(float *vals, int *pids, int n,
     float s = 0;
     for (int i = 0; i < n; i++) s += vals[i];
 
-    bool horiz     = rect.w >= rect.h;
-    float short_s  = horiz ? rect.h : rect.w;
-    float strip    = (total > 0) ? (s / total) * short_s : 0;
-    float pos      = horiz ? rect.y : rect.x;
+    bool horiz    = rect.w >= rect.h;
+    float short_s = horiz ? rect.h : rect.w;
+    float strip   = (total > 0) ? (s / total) * short_s : 0;
+    float pos     = horiz ? rect.y : rect.x;
 
     for (int i = 0; i < n; i++) {
         float frac      = (s > 0) ? vals[i] / s : 0;
@@ -39,9 +42,9 @@ static void layout_row(float *vals, int *pids, int n,
             nd->x = pos; nd->y = rect.y; nd->w = frac * rect.w; nd->h = strip;
             pos += nd->w;
         }
-        nd->pid         = pids[i];
+        nd->pid       = pids[i];
         nd->cpu_percent = 0;
-        nd->mem_bytes   = vals[i];
+        nd->mem_bytes = vals[i];
     }
     (void)strip;
 }
@@ -95,24 +98,46 @@ int treemap_build(const Snapshot *snap, TreemapNode *out, int max) {
     memcpy(sorted, snap->procs, sizeof(ProcessInfo) * count);
     qsort(sorted, count, sizeof(ProcessInfo), cmp_mem_desc);
 
-    static float vals[MAX_PROCESSES];
-    static int   pids[MAX_PROCESSES];
+    static float vals[MAX_PROCESSES + 1]; // +1 for Other slot
+    static int   pids[MAX_PROCESSES + 1];
+
+    float total_mem = 0;
+    for (int i = 0; i < count; i++) total_mem += (float)sorted[i].mem_rss;
+
+    // split into visible and Other
+    int   filtered   = 0;
+    float other_mem  = 0;
     for (int i = 0; i < count; i++) {
-        vals[i] = (float)sorted[i].mem_rss;
-        pids[i] = sorted[i].pid;
+        float share = (total_mem > 0) ? (float)sorted[i].mem_rss / total_mem : 0;
+        if (share < MIN_SHARE) {
+            other_mem += (float)sorted[i].mem_rss; // accumulate into Other
+        } else {
+            vals[filtered] = (float)sorted[i].mem_rss;
+            pids[filtered] = sorted[i].pid;
+            filtered++;
+        }
+    }
+
+    // append Other box if there's anything left
+    if (other_mem > 0) {
+        vals[filtered] = other_mem;
+        pids[filtered] = OTHER_PID;
+        filtered++;
     }
 
     int out_idx = 0;
     Rect root   = {0, 0, 1, 1};
-    squarify(vals, pids, count, root, &out_idx, out);
+    squarify(vals, pids, filtered, root, &out_idx, out);
 
-    // fill cpu_percent from snapshot
-    for (int i = 0; i < out_idx; i++)
+    // fill cpu_percent from snapshot — Other box gets 0
+    for (int i = 0; i < out_idx; i++) {
+        if (out[i].pid == OTHER_PID) continue;
         for (int j = 0; j < snap->count; j++)
             if (snap->procs[j].pid == out[i].pid) {
                 out[i].cpu_percent = snap->procs[j].cpu_percent;
                 break;
             }
+    }
 
     return out_idx;
 }
@@ -120,6 +145,7 @@ int treemap_build(const Snapshot *snap, TreemapNode *out, int max) {
 int treemap_hit(const TreemapNode *nodes, int count, float nx, float ny) {
     for (int i = 0; i < count; i++) {
         const TreemapNode *nd = &nodes[i];
+        if (nd->pid == OTHER_PID) continue; // Other box is not selectable
         if (nx >= nd->x && nx <= nd->x + nd->w &&
             ny >= nd->y && ny <= nd->y + nd->h)
             return nd->pid;
